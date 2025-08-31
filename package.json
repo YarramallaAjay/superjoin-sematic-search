@@ -6,21 +6,28 @@
     "dev": "next dev --turbopack",
     "build": "next build --turbopack",
     "start": "next start",
-    "test-connection": "ts-node --project tsconfig.json tests/connection.test"
+    "test-connection": "ts-node --project tsconfig.json tests/connection.test",
+    "test-parsing": "ts-node --project tsconfig.json tests/test-parsing.test"
   },
   "dependencies": {
     "@google/genai": "^1.16.0",
     "@google/generative-ai": "^0.24.1",
     "@huggingface/inference": "^4.7.1",
     "@types/axios": "^0.14.4",
+    "@types/base-64": "^1.0.2",
+    "@types/bcrypt": "^6.0.0",
     "@types/mongoose": "^5.11.97",
     "axios": "^1.11.0",
+    "base-64": "^1.0.0",
+    "base64": "^2.1.0",
+    "bcrypt": "^6.0.0",
     "dotenv": "^17.2.1",
     "mongoose": "^8.18.0",
     "next": "15.5.2",
     "react": "19.1.0",
     "react-dom": "19.1.0",
-    "ts-node": "^10.9.2"
+    "ts-node": "^10.9.2",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "typescript": "^5",
