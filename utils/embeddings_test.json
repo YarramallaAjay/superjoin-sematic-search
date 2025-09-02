@@ -1,0 +1,22 @@
+[
+    {
+      "query": "Revenue 2021 Q1",
+      "expected": [
+        "P&L Statement | Revenue | 2021 Q1",
+        "Sheet: Finance | Revenue | Q1 2021"
+      ]
+    },
+    {
+      "query": "Gross Profit 2022",
+      "expected": [
+        "P&L Statement | Gross Profit | 2022"
+      ]
+    },
+    {
+      "query": "EBITDA last year",
+      "expected": [
+        "Financial Summary | EBITDA | 2023"
+      ]
+    }
+  ]
+  

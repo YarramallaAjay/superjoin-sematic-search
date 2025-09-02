@@ -7,7 +7,10 @@
     "build": "next build --turbopack",
     "start": "next start",
     "test-connection": "ts-node --project tsconfig.json tests/connection.test",
-    "test-parsing": "ts-node --project tsconfig.json tests/test-parsing.test"
+    "test-parsing": "ts-node --project tsconfig.json tests/test-parsing.test",
+    "test-search": "ts-node --project tsconfig.json tests/test-search.test",
+    "test-async-parsing": "ts-node --project tsconfig.json tests/test-async-parsing.test",
+    "test-complete-workflow": "ts-node --project tsconfig.json tests/test-complete-workflow.test"
   },
   "dependencies": {
     "@google/genai": "^1.16.0",
@@ -21,6 +24,7 @@
     "base-64": "^1.0.0",
     "base64": "^2.1.0",
     "bcrypt": "^6.0.0",
+    "cosine": "^0.0.1",
     "dotenv": "^17.2.1",
     "mongoose": "^8.18.0",
     "next": "15.5.2",

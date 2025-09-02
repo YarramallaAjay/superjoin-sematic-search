@@ -1,0 +1,42 @@
+{
+  "metrics": {
+    "Revenue": ["sales", "turnover", "topline", "gross income", "income", "revenue"],
+    "Gross Profit": ["gross margin", "gp", "gross profit", "gross income"],
+    "Net Profit": ["net income", "bottom line", "profit after tax", "np", "net profit", "pat"],
+    "Operating Profit": ["ebit", "ebitda", "operating income", "operating profit", "operating earnings"],
+    "Cost of Goods Sold": ["cogs", "direct costs", "production costs", "cost of sales"],
+    "Expenses": ["opex", "operating expenses", "selling costs", "administrative expenses", "overhead"],
+    "Cash Flow": ["cf", "net cash", "cash inflow", "cash outflow", "operating cash flow"],
+    "Margin": ["profit margin", "operating margin", "net margin", "gross margin", "margin %"],
+    "Growth": ["yoy", "qoq", "growth rate", "increase", "change %", "growth", "growth %"],
+    "Forecast": ["projection", "estimate", "budget", "forecast", "planned"],
+    "EBITDA": ["ebitda", "earnings before interest tax depreciation amortization"],
+    "EBIT": ["ebit", "earnings before interest and tax"],
+    "Depreciation": ["depreciation", "dep", "amortization"],
+    "Interest": ["interest expense", "interest", "finance cost"],
+    "Tax": ["tax expense", "tax", "income tax", "corporate tax"]
+  },
+  "dimensions": {
+    "Customer": ["client", "account", "customer id", "buyer", "customer", "customer name"],
+    "Region": ["geography", "location", "area", "region", "territory", "zone"],
+    "Product": ["product", "item", "sku", "product name", "service"],
+    "Department": ["dept", "department", "division", "unit", "team"],
+    "Channel": ["channel", "sales channel", "distribution", "route to market"],
+    "Category": ["category", "segment", "classification", "type"]
+  },
+  "time": {
+    "Year": ["fy", "financial year", "year", "calendar year"],
+    "Quarter": ["q1", "q2", "q3", "q4", "quarter", "quarterly"],
+    "Month": ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec", "month", "monthly"]
+  },
+  "status": {
+    "Open": ["open", "active", "pending", "in progress"],
+    "Closed": ["closed", "completed", "resolved", "finished"],
+    "Cancelled": ["cancelled", "cancelled", "abandoned", "terminated"]
+  },
+  "priority": {
+    "High": ["high", "critical", "urgent", "priority 1"],
+    "Medium": ["medium", "normal", "standard", "priority 2"],
+    "Low": ["low", "minor", "low priority", "priority 3"]
+  }
+}

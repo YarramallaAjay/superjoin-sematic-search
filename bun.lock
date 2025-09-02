@@ -15,6 +15,7 @@
         "base-64": "^1.0.0",
         "base64": "^2.1.0",
         "bcrypt": "^6.0.0",
+        "cosine": "^0.0.1",
         "dotenv": "^17.2.1",
         "mongoose": "^8.18.0",
         "next": "15.5.2",
@@ -233,6 +234,8 @@
     "color-string": ["color-string@1.9.1", "", { "dependencies": { "color-name": "^1.0.0", "simple-swizzle": "^0.2.2" } }, "sha512-shrVawQFojnZv6xM40anx4CkoDP+fZsw/ZerEMsW/pyzsRbElpsL/DBVW7q3ExxwusdNXI3lXpuhEZkzs8p5Eg=="],
 
     "combined-stream": ["combined-stream@1.0.8", "", { "dependencies": { "delayed-stream": "~1.0.0" } }, "sha512-FQN4MRfuJeHf7cBbBMJFXhKSDq+2kAArBlmRBvcvFE5BB1HZKXtSFASDhdlz9zOYwxh8lDdnvmMOe/+5cdoEdg=="],
+
+    "cosine": ["cosine@0.0.1", "", {}, "sha512-ckzU1Wtjdw/USchNrPRGHMnqsRugalVuz6/zls+HeuJ0lUFlXdqjmBS+xKCBK/cxTFAbCmcoUmDbd18og0H71w=="],
 
     "crc-32": ["crc-32@1.2.2", "", { "bin": { "crc32": "bin/crc32.njs" } }, "sha512-ROmzCKrTnOwybPcJApAA6WBWij23HVfGVNKqqrZpuyZOHqK2CwHSvpGuyt/UNNvaIjEd8X5IFGp4Mh+Ie1IHJQ=="],
 

@@ -2,8 +2,9 @@ import mongoose from 'mongoose';
 
 import crypto from "crypto";
 import { WorkbookModel, SheetModel, AtlasCellModel, TenantModel } from "../models/workbook";
-import { parseWorkbook } from '../embedder/parse';
-
+import { parseWorkbookEnhanced } from '../embedder/parse';
+import { config } from 'dotenv';
+config({path: '.env.local'})
 let isConnected = false;
 
  export async function connectDB() {
@@ -13,7 +14,7 @@ let isConnected = false;
   }
 
   try {
-    const uri =process.env.MONGO_DB_URL||'mongodb+srv://ajay_db_owner:Mongo_SpaaS@cluster0.eedbshd.mongodb.net/';
+    const uri =process.env.MONGO_DB_URL||'mongodb+srv://ajay_db_owner:Mongo_SpaaS@cluster0.eedbshd.mongodb.net/SpaaS';
     
     console.log('Attempting to connect to MongoDB...');
     
@@ -134,7 +135,7 @@ process.on('SIGTERM', async () => {
     sheetStats.set(sheetId, { rowCount, colCount, cellCount });
   };
 
-  const parsedCells = await parseWorkbook(tenantId, workbookId, fileBuffer, onCellParsed, onSheetParsed);
+  const parsedCells = await parseWorkbookEnhanced(tenantId, workbookId, fileBuffer, onCellParsed, onSheetParsed);
 
   // Create sheet documents with actual sheet data
   for (const sId of sheetNames) {
@@ -168,7 +169,7 @@ process.on('SIGTERM', async () => {
   const batchSize = 100;
   for (let i = 0; i < parsedCells.length; i += batchSize) {
     const batch = parsedCells.slice(i, i + batchSize);
-    const updatePromises = batch.map((cell, index) => {
+    const updatePromises = batch.map((cell: any, index: number) => {
       const cellId = `cell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       return AtlasCellModel.updateOne(
         { 

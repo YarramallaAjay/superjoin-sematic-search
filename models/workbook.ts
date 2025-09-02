@@ -32,17 +32,27 @@ const SheetSchema = new Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
-// AtlasCell
+// Cell (AtlasCell)
 const AtlasCellSchema = new Schema({
   _id: { type: String, required: true },
   tenantId: { type: String, required: true, index: true },
   workbookId: { type: String, required: true, index: true },
   sheetId: { type: String, required: true, index: true },
 
-  rowHeader: String,
-  colHeader: String,
+  // Structured fields
+  sheetName: String,
+  metric: String,              // e.g. "EBITDA Margin", "Net Sales"
+  year: Number,
+  quarter: { type: String, enum: ["Q1", "Q2", "Q3", "Q4"] },
+  month: String,
+  region: String,
+  product: String,
+  customer: String,
+
+  // Semantic string for embeddings
   semanticString: { type: String, required: true },
 
+  // Actual cell values
   value: Schema.Types.Mixed,
   unit: { type: String, default: "INR" },
   dataType: { type: String, enum: ["number", "string", "date", "percent", "ratio"] },
@@ -55,15 +65,10 @@ const AtlasCellSchema = new Schema({
     isForecast: { type: Boolean, default: false }
   },
 
-  year: Number,
-  quarter: { type: String, enum: ["Q1", "Q2", "Q3", "Q4"] },
-  month: String,
-  region: String,
-  product: String,
-  customer: String,
-
+  // Vector embedding
   embedding: [{ type: Number, required: true }],
 
+  // Provenance
   sourceCell: String,
   sourceFormula: String,
 

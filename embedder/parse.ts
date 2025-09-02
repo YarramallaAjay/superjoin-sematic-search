@@ -1,190 +1,223 @@
 import * as XLSX from "xlsx";
-import { makeEmbeddings } from "./embedding";
+import { semanticNormalizer } from "../utils/semantic-normalizer";
+import { makeEmbeddingsOptimized } from "./embedding";
 
-interface ParsedCell {
+export interface EnhancedParsedCell {
+  _id: string;
   tenantId: string;
   workbookId: string;
   sheetId: string;
+
+  semanticString: string; // for embedding
+
   metric: string;
-  dimensions: Record<string, string>;
-  semanticString: string;
+  normalizedMetric: string;
+
+  year?: number;
+  quarter?: string;
+  month?: string;
+  region?: string;
+  customerId?: string;
+  customerName?: string;
+  product?: string;
+  department?: string;
+  channel?: string;
+  category?: string;
+  status?: string;
+  priority?: string;
+
+  dimensions: Record<string, any>;
+
   value: any;
   unit: string;
   dataType: string;
+
   features: {
     isPercentage: boolean;
     isMargin: boolean;
     isGrowth: boolean;
     isAggregation: boolean;
     isForecast: boolean;
+    isUniqueIdentifier: boolean;
   };
-  year?: number;
-  quarter?: string;
-  month?: string;
+
   embedding: number[];
-  sourceCell: string;
+
+  sourceCell: string | null;
   sourceFormula: string | null;
 }
 
-// ---------- Helpers ----------
+// -------- Parser ---------
 
-function isNumeric(val: any): boolean {
-  return typeof val === "number" || (!isNaN(val) && val !== null && val !== "");
-}
-
-function normalizeHeader(text: string): string {
-  if (!text) return "";
-  const lower = text.toLowerCase();
-  if (lower.includes("sales") || lower.includes("turnover")) return "Revenue";
-  if (lower.includes("gross") && lower.includes("profit")) return "Gross Profit";
-  if (lower.includes("net") && lower.includes("profit")) return "Net Profit";
-  if (lower.includes("ebit")) return "Operating Profit";
-  if (lower.includes("cogs")) return "Cost of Goods Sold";
-  if (lower.includes("margin")) return "Margin";
-  return text.trim();
-}
-
-function extractTimeHint(val: string): { year?: number; quarter?: string; month?: string } {
-  const hints: any = {};
-  const lower = (val || "").toLowerCase();
-
-  const yearMatch = val.match(/\b(20\d{2})\b/);
-  if (yearMatch) hints.year = parseInt(yearMatch[1]);
-
-  const quarterMatch = val.match(/\bQ([1-4])\b/i);
-  if (quarterMatch) hints.quarter = `Q${quarterMatch[1]}`;
-
-  const months = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"];
-  for (let i = 0; i < months.length; i++) {
-    if (lower.includes(months[i])) {
-      hints.month = months[i].charAt(0).toUpperCase() + months[i].slice(1);
-      if (!hints.quarter) hints.quarter = `Q${Math.floor(i / 3) + 1}`;
-      break;
-    }
-  }
-  return hints;
-}
-
-function formatTimeHint(hints: { year?: number; quarter?: string; month?: string }): string {
-  if (hints.year && hints.quarter) return `${hints.year} ${hints.quarter}`;
-  if (hints.year && hints.month) return `${hints.month} ${hints.year}`;
-  if (hints.year) return `${hints.year}`;
-  return "";
-}
-
-// ---------- Main Parser ----------
-
-export async function parseWorkbook(
+export async function parseWorkbookEnhanced(
   tenantId: string,
   workbookId: string,
   buffer: Buffer,
-  onCellParsed?: (cell: ParsedCell, cellId: string) => Promise<void>,
+  onCellParsed?: (cell: EnhancedParsedCell, cellId: string) => Promise<void>,
   onSheetParsed?: (sheetName: string, rowCount: number, colCount: number, cellCount: number) => Promise<void>
-): Promise<ParsedCell[]> {
+): Promise<EnhancedParsedCell[]> {
   const wb = XLSX.read(buffer, { type: "buffer" });
-  const parsed: ParsedCell[] = [];
-  const embeddingPromises: Promise<number[]>[] = [];
-  const cellIds: string[] = [];
+  const parsed: EnhancedParsedCell[] = [];
+  const semanticStrings: string[] = [];
+
+  console.log("📊 Starting enhanced workbook parsing...");
 
   for (const sheetName of wb.SheetNames) {
     const ws = wb.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json(ws, { defval: null }) as Record<string, any>[];
     if (!rows.length) continue;
 
-    // Detect metrics vs. dimensions
     const headers = Object.keys(rows[0]);
-    const metrics = headers.filter(h => rows.some(r => isNumeric(r[h])));
-    const dimensions = headers.filter(h => !metrics.includes(h));
-    
-    let sheetCellCount = 0;
+    const metrics = headers.filter((h) => rows.some((r) => isNumeric(r[h])));
+    const dimensions = headers.filter((h) => !metrics.includes(h));
 
-    for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
-      const row = rows[rowIndex];
+    console.log(`📄 Sheet: ${sheetName}`);
+    console.log("   → Metrics:", metrics);
+    console.log("   → Dimensions:", dimensions);
+
+    const sheetCells: EnhancedParsedCell[] = [];
+    const sheetSemanticStrings: string[] = [];
+
+    for (let rIndex = 0; rIndex < rows.length; rIndex++) {
+      const row = rows[rIndex];
 
       for (const metric of metrics) {
-        const metricName = normalizeHeader(metric);
         const metricVal = row[metric];
-        if (metricVal == null || metricVal === "") continue;
+        if (!isNumeric(metricVal)) continue;
 
-        const dims: Record<string, string> = {};
-        const dimParts: string[] = [];
-        let timeHints: any = {};
+        const dims: Record<string, any> = {};
+        const structuredFields: Record<string, any> = {};
 
-        for (const d of dimensions) {
-          if (!row[d]) continue;
-          const hints = extractTimeHint(String(row[d]));
-          if (Object.keys(hints).length) timeHints = { ...timeHints, ...hints };
-          const formatted = formatTimeHint(hints) || row[d];
-          dims[d] = formatted;
-          dimParts.push(`${d}=${formatted}`);
+        for (const dim of dimensions) {
+          if (!row[dim]) continue;
+
+          const dimValue = String(row[dim]);
+          dims[dim] = dimValue;
+
+          const normalized = semanticNormalizer.normalizeValue(dimValue);
+          const timeHints = semanticNormalizer.extractTimeHints(dimValue);
+
+          if (normalized.category === "time") {
+            if (timeHints.year) structuredFields.year = timeHints.year;
+            if (timeHints.quarter) structuredFields.quarter = timeHints.quarter;
+            if (timeHints.month) structuredFields.month = timeHints.month;
+          } else if (normalized.category === "dimension") {
+            if (normalized.normalized === "Region") structuredFields.region = dimValue;
+            if (normalized.normalized === "Customer") {
+              if (semanticNormalizer.isUniqueIdentifier(dimValue)) {
+                structuredFields.customerId = dimValue;
+                structuredFields.isUniqueIdentifier = true;
+              } else {
+                structuredFields.customerName = dimValue;
+              }
+            }
+            if (normalized.normalized === "Product") structuredFields.product = dimValue;
+            if (normalized.normalized === "Department") structuredFields.department = dimValue;
+            if (normalized.normalized === "Channel") structuredFields.channel = dimValue;
+            if (normalized.normalized === "Category") structuredFields.category = dimValue;
+          } else if (normalized.category === "status") {
+            structuredFields.status = normalized.normalized;
+          } else if (normalized.category === "priority") {
+            structuredFields.priority = normalized.normalized;
+          }
         }
 
-        const semanticString = [normalizeHeader(sheetName), metricName, ...dimParts].join(" | ");
-        
-        // Generate unique cell ID
+        const normalizedMetric = semanticNormalizer.normalizeMetric(metric);
+
+        const semanticString = semanticNormalizer.buildSemanticString(
+          sheetName,
+          normalizedMetric,
+          dims,
+          structuredFields
+        );
+
+        const dataType = determineDataType(metricVal, metric);
+        const features = determineFeatures(metric, metricVal, dataType);
+
         const cellId = `cell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        cellIds.push(cellId);
 
-        // Start embedding generation asynchronously
-        const embeddingPromise = makeEmbeddings([semanticString]).then(embeddings => embeddings[0]);
-        embeddingPromises.push(embeddingPromise);
-
-        // Reconstruct provenance (optional: cell address)
-        const colIndex = headers.indexOf(metric);
-        const addr = XLSX.utils.encode_cell({ r: rowIndex + 1, c: colIndex }); // +1 skips header row
-        const cell = ws[addr];
-
-        const parsedCell: ParsedCell = {
+        const parsedCell: EnhancedParsedCell = {
+          _id: cellId,
           tenantId,
           workbookId,
           sheetId: `sh_${sheetName.toLowerCase().replace(/\s+/g, "_")}`,
-          metric: metricName,
-          dimensions: dims,
           semanticString,
+
+          metric,
+          normalizedMetric,
+          ...structuredFields,
+
+          dimensions: dims,
           value: metricVal,
-          unit: typeof metricVal === "string" && metricVal.includes("%") ? "%" : "USD",
-          dataType:
-            typeof metricVal === "number"
-              ? "number"
-              : typeof metricVal === "string" && metricVal.includes("%")
-              ? "percent"
-              : "string",
-          features: {
-            isPercentage: typeof metricVal === "string" && metricVal.includes("%"),
-            isMargin: metricName.toLowerCase().includes("margin"),
-            isGrowth: metricName.toLowerCase().includes("growth"),
-            isAggregation: metricName.toLowerCase().includes("total"),
-            isForecast: sheetName.toLowerCase().includes("forecast"),
-          },
-          ...timeHints,
-          embedding: [], // will be filled later
-          sourceCell: addr,
-          sourceFormula: (cell as any)?.f || null,
+          unit: determineUnit(metric),
+          dataType,
+          features,
+
+          embedding: [],
+          sourceCell: `R${rIndex + 2}`, // keep simple, row-based reference
+          sourceFormula: null,
         };
 
-        parsed.push(parsedCell);
-        sheetCellCount++;
+        sheetCells.push(parsedCell);
+        sheetSemanticStrings.push(semanticString);
 
-        // If callback provided, store cell in DB immediately
-        if (onCellParsed) {
-          await onCellParsed(parsedCell, cellId);
-        }
+        if (onCellParsed) await onCellParsed(parsedCell, cellId);
       }
     }
-    
-    // Call sheet parsed callback
-    if (onSheetParsed) {
-      await onSheetParsed(sheetName, rows.length, headers.length, sheetCellCount);
-    }
+
+    if (onSheetParsed)
+      await onSheetParsed(sheetName, rows.length, headers.length, sheetCells.length);
+
+    parsed.push(...sheetCells);
+    semanticStrings.push(...sheetSemanticStrings);
   }
 
-  // Wait for all embeddings to complete
-  const embeddings = await Promise.all(embeddingPromises);
-  
-  // Attach embeddings to parsed cells
-  parsed.forEach((rec, i) => {
-    rec.embedding = embeddings[i];
+  console.log(`📊 Total metric cells parsed: ${parsed.length}`);
+
+  const embeddings = await makeEmbeddingsOptimized(semanticStrings); // batch size
+  parsed.forEach((cell, idx) => {
+    if (embeddings[idx]) cell.embedding = embeddings[idx];
   });
 
+  console.log(`✅ Attached embeddings to ${parsed.length} cells`);
   return parsed;
+}
+
+// -------- Helpers ----------
+
+function isNumeric(val: any): boolean {
+  return typeof val === "number" && !isNaN(val);
+}
+
+function determineDataType(value: any, metric: string): "number" | "string" | "date" | "percent" | "ratio" {
+  if (typeof value === "number") return "number";
+  if (typeof value === "string") {
+    if (value.includes("%") || metric.toLowerCase().includes("margin")) return "percent";
+    if (value.includes("/") || value.includes(":")) return "ratio";
+    if (value.match(/^\d{4}-\d{2}-\d{2}$/)) return "date";
+  }
+  return "string";
+}
+
+function determineUnit(metric: string): string {
+  const lower = metric.toLowerCase();
+  if (lower.includes("margin") || lower.includes("rate") || lower.includes("%")) return "%";
+  if (lower.includes("ratio")) return "ratio";
+  return "INR";
+}
+
+function determineFeatures(
+  metric: string,
+  value: any,
+  dataType: string
+): EnhancedParsedCell["features"] {
+  const lowerMetric = metric.toLowerCase();
+  return {
+    isPercentage: dataType === "percent" || lowerMetric.includes("margin"),
+    isMargin: lowerMetric.includes("margin") || lowerMetric.includes("profit"),
+    isGrowth: lowerMetric.includes("growth") || lowerMetric.includes("yoy") || lowerMetric.includes("qoq"),
+    isAggregation: lowerMetric.includes("total") || lowerMetric.includes("sum") || lowerMetric.includes("average"),
+    isForecast: lowerMetric.includes("forecast") || lowerMetric.includes("budget"),
+    isUniqueIdentifier: false,
+  };
 }
