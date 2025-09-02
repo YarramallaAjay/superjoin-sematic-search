@@ -2,15 +2,31 @@
   "name": "superjoin-semantic-search",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "npm@10.0.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build --turbopack",
-    "start": "next start",
+    "dev": "turbo run dev",
+    "dev:ui": "cd apps/ui; npm run dev",
+    "dev:backend": "npm run explore-and-test",
+    "build": "turbo run build",
+    "build:ui": "cd apps/ui; npm run build",
+    "lint": "turbo run lint",
     "test-connection": "ts-node --project tsconfig.json tests/connection.test",
     "test-parsing": "ts-node --project tsconfig.json tests/test-parsing.test",
     "test-search": "ts-node --project tsconfig.json tests/test-search.test",
     "test-async-parsing": "ts-node --project tsconfig.json tests/test-async-parsing.test",
-    "test-complete-workflow": "ts-node --project tsconfig.json tests/test-complete-workflow.test"
+    "test-complete-workflow": "ts-node --project tsconfig.json tests/test-complete-workflow.test",
+    "test-enhanced-search": "ts-node --project tsconfig.json tests/test-enhanced-search.test",
+    "test-simple-enhanced": "ts-node --project tsconfig.json tests/test-simple-enhanced-search.test",
+    "explore-and-test": "ts-node --project tsconfig.json tests/explore-and-test",
+    "test-normalization": "ts-node --project tsconfig.json tests/test-enhanced-normalization",
+    "show-semantic-strings": "ts-node --project tsconfig.json tests/show-semantic-strings",
+    "check-vector-index": "ts-node --project tsconfig.json tests/check-vector-index",
+    "check-actual-collections": "ts-node --project tsconfig.json tests/check-actual-collections",
+    "test-gemini": "ts-node --project tsconfig.json tests/test-gemini-config"
   },
   "dependencies": {
     "@google/genai": "^1.16.0",
@@ -24,21 +40,18 @@
     "base-64": "^1.0.0",
     "base64": "^2.1.0",
     "bcrypt": "^6.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "cosine": "^0.0.1",
     "dotenv": "^17.2.1",
     "mongoose": "^8.18.0",
-    "next": "15.5.2",
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
+    "openai": "^5.16.0",
+    "tailwind-merge": "^3.3.1",
     "ts-node": "^10.9.2",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "typescript": "^5",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "@tailwindcss/postcss": "^4",
-    "tailwindcss": "^4"
+    "turbo": "^2.5.6",
+    "typescript": "^5"
   }
 }
