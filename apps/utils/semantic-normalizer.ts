@@ -1,39 +1,38 @@
 // Import semantic dictionary data
-let semanticDictionary: Record<string, Record<string, string[]>>;
+// let semanticDictionary: Record<string, Record<string, string[]>>;
 
-try {
-  // Try to import the JSON file
-  semanticDictionary = require('../config/semantic-dictionary.json');
-} catch (error) {
-  console.warn('Failed to import semantic dictionary JSON, using fallback data');
-  // Fallback semantic dictionary
-  semanticDictionary = {
-    metrics: {
-      "Revenue": ["sales", "turnover", "topline", "gross income", "income", "revenue"],
-      "Gross Profit": ["gross margin", "gp", "gross profit", "gross income"],
-      "Net Profit": ["net income", "bottom line", "profit after tax", "np", "net profit"]
-    },
-    dimensions: {
-      "Customer": ["client", "account", "customer id", "buyer", "customer"],
-      "Region": ["geography", "location", "area", "region", "territory"],
-      "Product": ["product", "item", "sku", "product name", "service"]
-    },
-    time: {
-      "Year": ["fy", "financial year", "year", "calendar year", "annual"],
-      "Quarter": ["q1", "q2", "q3", "q4", "quarter", "quarterly"],
-      "Month": ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
-    },
-    status: {
-      "Open": ["open", "active", "pending", "in progress", "ongoing"],
-      "Closed": ["closed", "completed", "resolved", "finished", "done"]
-    },
-    priority: {
-      "High": ["high", "critical", "urgent", "priority 1", "top priority"],
-      "Medium": ["medium", "normal", "standard", "priority 2", "moderate"],
-      "Low": ["low", "minor", "low priority", "priority 3", "minimal"]
-    }
-  };
-}
+// try {
+//   // Try to import the JSON file
+// } catch (error) {
+//   console.warn('Failed to import semantic dictionary JSON, using fallback data');
+//   // Fallback semantic dictionary
+//   semanticDictionary = {
+//     metrics: {
+//       "Revenue": ["sales", "turnover", "topline", "gross income", "income", "revenue"],
+//       "Gross Profit": ["gross margin", "gp", "gross profit", "gross income"],
+//       "Net Profit": ["net income", "bottom line", "profit after tax", "np", "net profit"]
+//     },
+//     dimensions: {
+//       "Customer": ["client", "account", "customer id", "buyer", "customer"],
+//       "Region": ["geography", "location", "area", "region", "territory"],
+//       "Product": ["product", "item", "sku", "product name", "service"]
+//     },
+//     time: {
+//       "Year": ["fy", "financial year", "year", "calendar year", "annual"],
+//       "Quarter": ["q1", "q2", "q3", "q4", "quarter", "quarterly"],
+//       "Month": ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+//     },
+//     status: {
+//       "Open": ["open", "active", "pending", "in progress", "ongoing"],
+//       "Closed": ["closed", "completed", "resolved", "finished", "done"]
+//     },
+//     priority: {
+//       "High": ["high", "critical", "urgent", "priority 1", "top priority"],
+//       "Medium": ["medium", "normal", "standard", "priority 2", "moderate"],
+//       "Low": ["low", "minor", "low priority", "priority 3", "minimal"]
+//     }
+//   };
+// }
 
 export interface NormalizedValue {
   original: string;
@@ -188,6 +187,109 @@ export class SemanticNormalizer {
     });
 
     return { metrics, dimensions, filters, timeFilters };
+  }
+
+  // ---- Enhanced Query Normalization ----
+  public normalizeQuery(query: string): string {
+    if (!query || typeof query !== 'string') return '';
+    
+    console.log(`🔍 Normalizing query: "${query}"`);
+    
+    // Split query into meaningful phrases and words
+    const phrases = this.extractPhrases(query);
+    const normalizedParts: string[] = [];
+    
+    // Process each phrase/word
+    phrases.forEach(phrase => {
+      const normalized = this.normalizeValue(phrase);
+      if (normalized.confidence > 0.3) { // Only include if we have reasonable confidence
+        normalizedParts.push(normalized.normalized);
+      } else {
+        // For low confidence, try to extract meaningful parts
+        const meaningfulParts = this.extractMeaningfulParts(phrase);
+        normalizedParts.push(...meaningfulParts);
+      }
+    });
+    
+    // Remove duplicates and filter out empty values
+    const uniqueParts = [...new Set(normalizedParts)].filter(part => 
+      part && part !== 'unknown' && part.trim().length > 0
+    );
+    
+    const normalizedQuery = uniqueParts.join(' | ');
+    console.log(`📝 Normalized query: "${normalizedQuery}"`);
+    
+    return normalizedQuery;
+  }
+
+  // ---- Extract meaningful phrases from query ----
+  private extractPhrases(query: string): string[] {
+    const lowerQuery = query.toLowerCase();
+    const phrases: string[] = [];
+    
+    // Extract multi-word phrases that might be in our dictionary
+    const multiWordPhrases = this.findMultiWordPhrases(lowerQuery);
+    phrases.push(...multiWordPhrases);
+    
+    // Extract individual words that aren't part of multi-word phrases
+    const words = lowerQuery.split(/\s+/);
+    const usedWords = new Set<string>();
+    
+    // Mark words that are part of multi-word phrases
+    multiWordPhrases.forEach(phrase => {
+      phrase.split(/\s+/).forEach(word => usedWords.add(word));
+    });
+    
+    // Add remaining individual words
+    words.forEach(word => {
+      if (!usedWords.has(word) && word.length > 2) { // Only meaningful words
+        phrases.push(word);
+      }
+    });
+    
+    return phrases;
+  }
+
+  // ---- Find multi-word phrases in dictionary ----
+  private findMultiWordPhrases(query: string): string[] {
+    const phrases: string[] = [];
+    
+    // Check all categories for multi-word phrases
+    Object.entries(semanticDictionary).forEach(([category, mappings]) => {
+      Object.entries(mappings).forEach(([normalized, variants]) => {
+        variants.forEach(variant => {
+          if (variant.includes(' ') && query.includes(variant.toLowerCase())) {
+            phrases.push(variant);
+          }
+        });
+      });
+    });
+    
+    return phrases;
+  }
+
+  // ---- Extract meaningful parts from low-confidence phrases ----
+  private extractMeaningfulParts(phrase: string): string[] {
+    const parts: string[] = [];
+    const lowerPhrase = phrase.toLowerCase();
+    
+    // Check if any part of the phrase matches our dictionary
+    Object.entries(semanticDictionary).forEach(([category, mappings]) => {
+      Object.entries(mappings).forEach(([normalized, variants]) => {
+        variants.forEach(variant => {
+          if (lowerPhrase.includes(variant.toLowerCase())) {
+            parts.push(normalized);
+          }
+        });
+      });
+    });
+    
+    // If no matches found, return the original phrase if it's meaningful
+    if (parts.length === 0 && phrase.length > 2) {
+      parts.push(phrase);
+    }
+    
+    return parts;
   }
 }
 

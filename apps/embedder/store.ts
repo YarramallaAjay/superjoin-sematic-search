@@ -37,41 +37,34 @@ export async function storeCellsEnhanced(
           tenantId: cell.tenantId,
           workbookId: cell.workbookId,
           sheetId: cell.sheetId,
+          sheetName: cell.sheetName,
           
-          // Semantic string
+          // Precise cell location
+          rowIndex: cell.rowIndex,
+          colIndex: cell.colIndex,
+          rowName: cell.rowName,
+          colName: cell.colName,
+          cellAddress: cell.cellAddress,
+          
+          // Raw and parsed values
+          rawValue: cell.rawValue,
+          value: cell.value,
+          metric: cell.metric,
+          
+          // Semantic string for embedding
           semanticString: cell.semanticString,
           
-          // Structured fields
-          metric: cell.metric,
-          normalizedMetric: cell.normalizedMetric,
-          
-          // Time dimensions
+          // Time dimensions (year, month, quarter)
           year: cell.year,
-          quarter: cell.quarter,
           month: cell.month,
+          quarter: cell.quarter,
           
-          // Business dimensions
-          region: cell.region,
-          customerId: cell.customerId,
-          customerName: cell.customerName,
-          product: cell.product,
-          department: cell.department,
-          channel: cell.channel,
-          category: cell.category,
-          
-          // Status and priority
-          status: cell.status,
-          priority: cell.priority,
-          
-          // Legacy dimensions map
+          // All dimensions (preserved as-is)
           dimensions: cell.dimensions,
           
-          // Value and metadata
-          value: cell.value,
-          unit: cell.unit,
+          // Data type and features
           dataType: cell.dataType,
-          
-          // Features
+          unit: cell.unit,
           features: cell.features,
           
           // Embedding

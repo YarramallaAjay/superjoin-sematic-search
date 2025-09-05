@@ -1,273 +1,710 @@
 import * as XLSX from "xlsx";
-import { semanticNormalizer } from "../utils/semantic-normalizer";
 import { makeEmbeddingsOptimized } from "./embedding";
+
+/**
+ * PRECISE CELL PARSING - INTELLIGENT SEMANTIC FORMATTING
+ * 
+ * This parser intelligently formats semantic strings based on row value type:
+ * 
+ * FOR CODED ROWS (like "CUST_001", "PROD_002", "SKU-001"):
+ * - Uses actual column headers joined with underscore
+ * - Example: "Sales | customer_region | 2023 | Jan"
+ * 
+ * FOR NORMAL ROWS (like "John Smith", "Company ABC"):
+ * - Uses "RowName_ColName" format
+ * - Example: "Sales | John Smith_Revenue | 2023 | Jan"
+ * 
+ * Semantic string format: "SheetName | SemanticPart | Year | Month"
+ */
 
 export interface EnhancedParsedCell {
   _id: string;
   tenantId: string;
   workbookId: string;
   sheetId: string;
+  sheetName: string;
 
-  semanticString: string; // for embedding
+  // Precise cell location and data
+  rowIndex: number;
+  colIndex: number;
+  rowName: string | null;
+  colName: string | null;
+  cellAddress: string; // e.g., "A1", "B5"
 
-  metric: string;
-  normalizedMetric: string;
+  // Raw values - no normalization
+  rawValue: any;
+  value: number | string | Date | null; // parsed numeric value, date, or string
+  metric: string; // column header (e.g., "Revenue", "Gross Profit")
+  
+  // Semantic string for embedding (simple format: "SheetName | RowName_ColName | Year | Month")
+  semanticString: string;
 
+  // Time dimensions (year, month, quarter)
   year?: number;
-  quarter?: string;
   month?: string;
-  region?: string;
-  customerId?: string;
-  customerName?: string;
-  product?: string;
-  department?: string;
-  channel?: string;
-  category?: string;
-  status?: string;
-  priority?: string;
+  quarter?: string;
 
+  // Other dimensions (preserve original values, don't normalize)
   dimensions: Record<string, any>;
 
-  value: any;
+  // Data type and features
+  dataType: "number" | "string" | "date" | "percent" | "ratio";
   unit: string;
-  dataType: string;
-
   features: {
     isPercentage: boolean;
     isMargin: boolean;
     isGrowth: boolean;
     isAggregation: boolean;
     isForecast: boolean;
-    isUniqueIdentifier: boolean;
+    isHeader: boolean;
+    isData: boolean;
+    isTotal: boolean;
   };
 
   embedding: number[];
-
-  sourceCell: string | null;
+  sourceCell: string;
   sourceFormula: string | null;
 }
 
-// -------- Parser ---------
+interface HeaderInfo {
+  rowHeaders: string[];
+  columnHeaders: string[];
+  dataStartRow: number;
+}
 
-export async function parseAnd_upload_cells(
-  tenantId: string,
-  workbookId: string,
-  buffer: Buffer,
-  onCellParsed?: (cell: EnhancedParsedCell, cellId: string) => Promise<void>,
-  onSheetParsed?: (sheetName: string, rowCount: number, colCount: number, cellCount: number) => Promise<void>
-): Promise<EnhancedParsedCell[]> {
-  const wb = XLSX.read(buffer, { type: "buffer" });
-  const parsed: EnhancedParsedCell[] = [];
-  const semanticStrings: string[] = [];
+export class ExcelParser {
+  private monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 
+                        'july', 'august', 'september', 'october', 'november', 'december'];
 
-  console.log("📊 Starting enhanced workbook parsing...");
+  /**
+   * Main function to parse and upload cells
+   */
+  async parseAndUploadCells(
+    tenantId: string,
+    workbookId: string,
+    buffer: Buffer,
+    onCellParsed?: (cell: EnhancedParsedCell, cellId: string) => Promise<void>,
+    onSheetParsed?: (sheetName: string, rowCount: number, colCount: number, cellCount: number) => Promise<void>
+  ): Promise<EnhancedParsedCell[]> {
+    const wb = XLSX.read(buffer, { type: "buffer" });
+    const allCells: EnhancedParsedCell[] = [];
 
-  for (const sheetName of wb.SheetNames) {
-    const ws = wb.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(ws, { defval: null }) as Record<string, any>[];
-    if (!rows.length) continue;
+    console.log("📊 Starting INTELLIGENT workbook parsing...");
+    console.log("   → Coded rows (CUST_001) → use headers (customer_region)");
+    console.log("   → Normal rows (John Smith) → use RowName_ColName format");
+    console.log("   → Semantic format: 'SheetName | SemanticPart | Year | Month'");
 
-    const headers = Object.keys(rows[0]);
-    const metrics = headers.filter((h) => rows.some((r) => isNumeric(r[h])));
-    const dimensions = headers.filter((h) => !metrics.includes(h));
+    for (const sheetName of wb.SheetNames) {
+      const ws = wb.Sheets[sheetName];
+      
+      // Get the actual range of data in the sheet
+      const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+      const maxRow = range.e.r;
+      const maxCol = range.e.c;
+      
+      console.log(`📄 Sheet: ${sheetName} (${maxRow + 1} rows, ${maxCol + 1} columns)`);
 
-    console.log(`📄 Sheet: ${sheetName}`);
-    console.log("   → Metrics:", metrics);
-    console.log("   → Dimensions:", dimensions);
+      // Parse the sheet synchronously
+      const sheetCells = this.parseSheet(ws, sheetName, maxRow, maxCol, tenantId, workbookId);
+      
+      console.log(`   → Parsed ${sheetCells.length} cells from sheet ${sheetName}`);
 
-    const sheetCells: EnhancedParsedCell[] = [];
-    const sheetSemanticStrings: string[] = [];
+      // Call the callback for each cell
+      for (const cell of sheetCells) {
+        if (onCellParsed) await onCellParsed(cell, cell._id);
+      }
 
-    for (let rIndex = 0; rIndex < rows.length; rIndex++) {
-      const row = rows[rIndex];
+      if (onSheetParsed) {
+        await onSheetParsed(sheetName, maxRow + 1, maxCol + 1, sheetCells.length);
+      }
 
-             for (const metric of metrics) {
-         const metricVal = row[metric];
-         const parsedValue = parseNumericValue(metricVal);
-         
-         // Debug logging
-         if (rIndex < 3) { // Only log first 3 rows to avoid spam
-           console.log(`  Row ${rIndex + 1}, Metric ${metric}:`, {
-             original: metricVal,
-             type: typeof metricVal,
-             parsed: parsedValue,
-             isNumeric: isNumeric(metricVal)
-           });
-         }
-         
-         if (parsedValue === null) continue;
+      allCells.push(...sheetCells);
+    }
 
-        const dims: Record<string, any> = {};
-        const structuredFields: Record<string, any> = {};
+    console.log(`📊 Total cells parsed: ${allCells.length}`);
 
-        for (const dim of dimensions) {
-          if (!row[dim]) continue;
+    // Generate embeddings for all cells at once
+    const semanticStrings = allCells.map(cell => ({
+      cellId: cell._id,
+      semanticString: cell.semanticString
+    }));
+    const embeddings = await makeEmbeddingsOptimized(semanticStrings);
+    if(embeddings.length!==allCells.length){
+      console.log("All embeddings are not generated")
+      throw new Error("All embeddings are not generated");
+    }
+    // Attach embeddings to cells using cellId mapping
+    embeddings.forEach((embeddingResult) => {
+      const cell = allCells.find(cell => cell._id === embeddingResult.cellId);
+      if (cell) {
+        cell.embedding = embeddingResult.embedding;
+      }
+    });
 
-          const dimValue = String(row[dim]);
-          dims[dim] = dimValue;
+    console.log(`✅ Attached embeddings to ${allCells.length} cells`);
+    return allCells;
+  }
 
-          const normalized = semanticNormalizer.normalizeValue(dimValue);
-          const timeHints = semanticNormalizer.extractTimeHints(dimValue);
+  /**
+   * Parse a single sheet
+   */
+  private parseSheet(
+    ws: XLSX.WorkSheet, 
+    sheetName: string, 
+    maxRow: number, 
+    maxCol: number,
+    tenantId: string,
+    workbookId: string
+  ): EnhancedParsedCell[] {
+    const cells: EnhancedParsedCell[] = [];
+    const timeInfo: { year?: number; month?: string; quarter?: string; hour?: number; ampm?: string } = {};
+    
+    // First pass: identify headers and data structure
+    const headers = this.extractHeaders(ws, maxRow, maxCol);
+    const dataStartRow = headers.dataStartRow;
+    
+    console.log(`   → Headers found at row ${headers.rowHeaders}:`, headers.columnHeaders);
+    console.log(`   → Data starts at row ${dataStartRow}`);
 
-          if (normalized.category === "time") {
-            if (timeHints.year) structuredFields.year = timeHints.year;
-            if (timeHints.quarter) structuredFields.quarter = timeHints.quarter;
-            if (timeHints.month) structuredFields.month = timeHints.month;
-          } else if (normalized.category === "dimension") {
-            if (normalized.normalized === "Region") structuredFields.region = dimValue;
-            if (normalized.normalized === "Customer") {
-              if (semanticNormalizer.isUniqueIdentifier(dimValue)) {
-                structuredFields.customerId = dimValue;
-                structuredFields.isUniqueIdentifier = true;
-              } else {
-                structuredFields.customerName = dimValue;
-              }
-            }
-            if (normalized.normalized === "Product") structuredFields.product = dimValue;
-            if (normalized.normalized === "Department") structuredFields.department = dimValue;
-            if (normalized.normalized === "Channel") structuredFields.channel = dimValue;
-            if (normalized.normalized === "Category") structuredFields.category = dimValue;
-          } else if (normalized.category === "status") {
-            structuredFields.status = normalized.normalized;
-          } else if (normalized.category === "priority") {
-            structuredFields.priority = normalized.normalized;
-          }
+    // Second pass: parse data cells
+    for (let rowIndex = dataStartRow; rowIndex <= maxRow; rowIndex++) {
+      const rowData = this.extractRowData(ws, rowIndex, maxCol, headers);
+      
+      // Process each column in the row
+      for (let colIndex = 0; colIndex < headers.columnHeaders.length; colIndex++) {
+        const colName = headers.columnHeaders[colIndex];
+        const cellValue = rowData[colIndex];
+          
+        // Skip empty cells
+        if (cellValue === null || cellValue === undefined || cellValue === '') {
+          continue;
         }
 
-        const normalizedMetric = semanticNormalizer.normalizeMetric(metric);
+        // Process both numeric values and dates
+        let processedValue: any = null;
+        let dataType: "number" | "string" | "date" | "percent" | "ratio" = "string";
+        
+        // Check if it's a date first
+        if (this.isDateValue(cellValue)) {
+          processedValue = cellValue;
+          dataType = "date";
+        } else {
+          // Try to parse as numeric value
+          const numericValue = this.parseNumericValue(cellValue);
+          if (numericValue === null) continue; // Skip non-numeric, non-date values
+          
+          processedValue = numericValue;
+          dataType = "number";
+        }
 
-        const semanticString = semanticNormalizer.buildSemanticString(
+        // Extract row name (first column value) - preserve original value like "CUST_001"
+        const rowName = rowData[0] ? String(rowData[0]) : null;
+        
+        // Create semantic string: "SheetName | RowName_ColName | Year | Month"
+        // For coded rows like "CUST_001", use headers like "customer_region"
+        // For normal rows, use "RowName_ColName" format
+        const semanticString = this.buildSemanticString(sheetName, rowName, colName, rowData, headers.columnHeaders);
+        
+        // Extract time dimensions (only year and month)
+        // const timeInfo = this.extractTimeInfo(rowData);
+        
+        // Create cell object
+        const cell: EnhancedParsedCell = {
+          _id: `cell_${Math.random().toString(36).substring(2, 15)}`,
+          tenantId,
+          workbookId,
+          sheetId: `sh_${sheetName.toLowerCase().replace(/\s+/g, "_")}`,
           sheetName,
-          normalizedMetric,
-          dims,
-          structuredFields
-        );
+          
+          rowIndex: rowIndex + 1, // 1-based
+          colIndex: colIndex + 1, // 1-based
+          rowName,
+          colName,
+          cellAddress: XLSX.utils.encode_cell({ r: rowIndex, c: colIndex }),
+          
+          rawValue: cellValue,
+          value: processedValue, // Store the actual value (numeric or date)
+          metric: colName,
+          
+          semanticString,
 
-                 const dataType = determineDataType(parsedValue, metric);
-         const features = determineFeatures(metric, parsedValue, dataType);
+          year: timeInfo.year,
+          month: timeInfo.month,
+          quarter: timeInfo.quarter,
+          
+          dimensions: this.extractDimensions(rowData, headers.columnHeaders),
+          
+          dataType: dataType,
+          unit: this.determineUnit(colName),
+          features: this.determineFeatures(colName, cellValue, rowIndex, dataStartRow),
 
-        const cellId = `cell_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          embedding: [],
+          sourceCell: XLSX.utils.encode_cell({ r: rowIndex, c: colIndex }),
+          sourceFormula: null,
+        };
 
-                 const parsedCell: EnhancedParsedCell = {
-           _id: cellId,
-           tenantId,
-           workbookId,
-           sheetId: `sh_${sheetName.toLowerCase().replace(/\s+/g, "_")}`,
-           semanticString,
+        // Debug logging for first few cells to show the new semantic format
+        if (cells.length < 3) {
+          const isCoded = rowName ? this.isCodedValue(rowName) : false;
+          console.log(`   📊 Cell ${cells.length + 1}:`, {
+            rowName: rowName,
+            colName: colName,
+            isCoded: isCoded,
+            semanticString: semanticString,
+            value: processedValue,
+            dataType: dataType
+          });
+        }
 
-           metric,
-           normalizedMetric,
-           ...structuredFields,
-
-           dimensions: dims,
-           value: parsedValue, // Use the parsed numeric value instead of original
-           unit: determineUnit(metric),
-           dataType,
-           features,
-
-           embedding: [],
-           sourceCell: `R${rIndex + 2}`, // keep simple, row-based reference
-           sourceFormula: null,
-         };
-
-        sheetCells.push(parsedCell);
-        sheetSemanticStrings.push(semanticString);
-
-        if (onCellParsed) await onCellParsed(parsedCell, cellId);
+        cells.push(cell);
       }
     }
 
-    if (onSheetParsed)
-      await onSheetParsed(sheetName, rows.length, headers.length, sheetCells.length);
-
-    parsed.push(...sheetCells);
-    semanticStrings.push(...sheetSemanticStrings);
+    return cells;
   }
 
-  console.log(`📊 Total metric cells parsed: ${parsed.length}`);
-
-  const embeddings = await makeEmbeddingsOptimized(semanticStrings); // batch size
-  parsed.forEach((cell, idx) => {
-    if (embeddings[idx]) cell.embedding = embeddings[idx];
-  });
-
-  console.log(`✅ Attached embeddings to ${parsed.length} cells`);
-  return parsed;
-}
-
-// -------- Helpers ----------
-
-function isNumeric(val: any): boolean {
-  if (val === null || val === undefined) return false;
-  
-  // If it's already a number, check if it's valid
-  if (typeof val === "number") {
-    return !isNaN(val) && isFinite(val);
-  }
-  
-  // If it's a string, try to parse it
-  if (typeof val === "string") {
-    // Remove common Excel formatting
-    const cleanVal = val.replace(/[$,%,\s]/g, '').replace(/,/g, '');
+  /**
+   * Extract headers from the worksheet
+   */
+  private extractHeaders(ws: XLSX.WorkSheet, maxRow: number, maxCol: number): HeaderInfo {
+    // Look for the first row that contains mostly text values (headers)
+    let headerRow = 0;
+    let rowHeaders: string[] = [], columnHeaders: string[] = [];
     
-    // Try to parse as number
-    const parsed = parseFloat(cleanVal);
-    return !isNaN(parsed) && isFinite(parsed);
-  }
-  
-  return false;
-}
+    for (let row = 0; row <= Math.min(10, maxRow); row++) {
+      const cellAddress = XLSX.utils.encode_cell({ r: row, c: 0 });
+      const cell = ws[cellAddress];
+      const textCount = this.countTextCells(ws, row, maxCol);
+      const totalCells = textCount + 1;
 
-function parseNumericValue(val: any): number | null {
-  if (val === null || val === undefined) return null;
-  
-  // If it's already a number, return it if valid
-  if (typeof val === "number") {
-    return !isNaN(val) && isFinite(val) ? val : null;
+      if (cell && cell.v !== null && cell.v !== undefined) {
+        rowHeaders.push(String(cell.v).trim());
+      }
+    }
+
+    // Extract column names from the header row
+    for (let col = 0; col <= maxCol; col++) {
+      const cellAddress = XLSX.utils.encode_cell({ r: headerRow, c: col });
+      const cell = ws[cellAddress];
+      
+      if (cell && cell.v !== null && cell.v !== undefined) {
+        columnHeaders.push(String(cell.v).trim());
+      } else {
+        columnHeaders.push(`Column_${col + 1}`);
+      }
+    }
+
+    return {
+      rowHeaders,
+      columnHeaders,
+      dataStartRow: headerRow + 1
+    };
   }
-  
-  // If it's a string, try to parse it
-  if (typeof val === "string") {
-    // Remove common Excel formatting
-    const cleanVal = val.replace(/[$,%,\s]/g, '').replace(/,/g, '');
+
+  /**
+   * Count text cells in a row
+   */
+  private countTextCells(ws: XLSX.WorkSheet, row: number, maxCol: number): number {
+    let textCount = 0;
     
-    // Try to parse as number
-    const parsed = parseFloat(cleanVal);
-    return !isNaN(parsed) && isFinite(parsed) ? parsed : null;
+    for (let col = 0; col <= maxCol; col++) {
+      const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
+      const cell = ws[cellAddress];
+      
+      if (cell && cell.v !== null && cell.v !== undefined) {
+        const value = cell.v;
+        if (typeof value === 'string' || (typeof value === 'number' && !this.isNumeric(value))) {
+          textCount++;
+        }
+      }
+    }
+    
+    return textCount;
   }
-  
-  return null;
-}
 
-function determineDataType(value: any, metric: string): "number" | "string" | "date" | "percent" | "ratio" {
-  if (typeof value === "number") return "number";
-  if (typeof value === "string") {
-    if (value.includes("%") || metric.toLowerCase().includes("margin")) return "percent";
-    if (value.includes("/") || value.includes(":")) return "ratio";
-    if (value.match(/^\d{4}-\d{2}-\d{2}$/)) return "date";
+  /**
+   * Extract row data from the worksheet
+   */
+  private extractRowData(ws: XLSX.WorkSheet, row: number, maxCol: number, headers: HeaderInfo): any[] {
+    const rowData: any[] = [];
+    
+    for (let col = 0; col < headers.columnHeaders.length; col++) {
+      const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
+      const cell = ws[cellAddress];
+      
+      if (cell && cell.v !== null && cell.v !== undefined) {
+        rowData.push(cell.v);
+      } else {
+        rowData.push(null);
+      }
+    }
+    console.log(rowData);
+    
+    return rowData;
   }
-  return "string";
+
+  /**
+   * Build semantic string for the cell
+   */
+  private buildSemanticString(
+    sheetName: string, 
+    rowName: string | null, 
+    colName: string, 
+    rowData: any[], 
+    columnHeaders: string[]
+  ): string {
+    const parts: string[] = [];
+    
+    // 1. Sheet name
+    parts.push(sheetName);
+    
+    // 2. Determine the semantic part based on row value type
+    let semanticPart: string;
+    
+    // For normal row names, use "RowName_ColName" format
+    semanticPart = rowName ? `${rowName}|${colName}` : colName;
+    
+    parts.push(semanticPart);
+    
+    // 3. Time dimensions (only year and month)
+    const timeInfo = this.extractTimeInfo(rowData);
+    if (timeInfo.year) parts.push(String(timeInfo.year));
+    if (timeInfo.month) parts.push(timeInfo.month);
+    
+    return parts.join(' | ');
+  }
+
+  /**
+   * Extract time information from row data
+   */
+  private extractTimeInfo(rowData: any[]): { year?: number; month?: string; quarter?: string; hour?: number; ampm?: string } {
+    const timeInfo: { year?: number; month?: string; quarter?: string; hour?: number; ampm?: string } = {};
+    
+    for (const value of rowData) {
+      if (!value) continue;
+      
+      const strValue = String(value);
+      
+      // Extract year patterns (4-digit year, 2-digit year, year ranges)
+      const yearPatterns = [
+        /\b(20\d{2})\b/,           // 2023, 2024, etc.
+        /\b(19\d{2})\b/,           // 1990, 1995, etc.
+        /\b(2\d{3})\b/,            // 2000-2999
+        /\b(1\d{3})\b/,            // 1000-1999
+        /\b(\d{2})['s]?\b/         // '23, '24, 23s, 24s
+      ];
+      
+      for (const pattern of yearPatterns) {
+        const yearMatch = strValue.match(pattern);
+        if (yearMatch && !timeInfo.year) {
+          let year = parseInt(yearMatch[1]);
+          // Handle 2-digit years
+          if (year < 100) {
+            year = year >= 50 ? 1900 + year : 2000 + year; // 50+ = 1950s, <50 = 2000s
+          }
+          timeInfo.year = year;
+          break;
+        }
+      }
+      
+      // Extract month patterns (full names, abbreviations, numbers, roman numerals)
+      const monthPatterns = [
+        // Full month names
+        /\b(january|jan)\b/i,
+        /\b(february|feb)\b/i,
+        /\b(march|mar)\b/i,
+        /\b(april|apr)\b/i,
+        /\b(may)\b/i,
+        /\b(june|jun)\b/i,
+        /\b(july|jul)\b/i,
+        /\b(august|aug)\b/i,
+        /\b(september|sept?)\b/i,
+        /\b(october|oct)\b/i,
+        /\b(november|nov)\b/i,
+        /\b(december|dec)\b/i,
+        // Month numbers (1-12)
+        /\b(0?[1-9]|1[0-2])\b/,
+        // Roman numerals
+        /\b(i|ii|iii|iv|v|vi|vii|viii|ix|x|xi|xii)\b/i
+      ];
+      
+      const romanMonths = ['i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x', 'xi', 'xii'];
+      
+      for (let i = 0; i < monthPatterns.length; i++) {
+        const match = strValue.match(monthPatterns[i]);
+        if (match && !timeInfo.month) {
+          let monthIndex = -1;
+          
+          if (i < 12) {
+            // Full month names
+            monthIndex = i;
+          } else if (i === 12) {
+            // Month numbers
+            monthIndex = parseInt(match[1]) - 1;
+          } else if (i === 13) {
+            // Roman numerals
+            monthIndex = romanMonths.indexOf(match[1].toLowerCase());
+          }
+          
+          if (monthIndex >= 0 && monthIndex < 12) {
+            timeInfo.month = this.monthNames[monthIndex];
+            break;
+          }
+        }
+      }
+      
+      // Extract quarter patterns
+      const quarterPatterns = [
+        /\b(q[1-4])\b/i,           // Q1, Q2, Q3, Q4
+        /\b(quarter\s*[1-4])\b/i,  // quarter 1, quarter 2, etc.
+        /\b(first|second|third|fourth)\s*quarter\b/i, // first quarter, etc.
+        /\b(1st|2nd|3rd|4th)\s*quarter\b/i,  // 1st quarter, etc.
+        /\b(q[1-4]\s*\d{4})\b/i    // Q1 2023, Q2 2024
+      ];
+      
+      for (const pattern of quarterPatterns) {
+        const quarterMatch = strValue.match(pattern);
+        if (quarterMatch && !timeInfo.quarter) {
+          const quarterText = quarterMatch[1].toLowerCase();
+          if (quarterText.startsWith('q')) {
+            timeInfo.quarter = quarterText.toUpperCase();
+          } else if (quarterText.includes('1') || quarterText.includes('first') || quarterText.includes('1st')) {
+            timeInfo.quarter = 'Q1';
+          } else if (quarterText.includes('2') || quarterText.includes('second') || quarterText.includes('2nd')) {
+            timeInfo.quarter = 'Q2';
+          } else if (quarterText.includes('3') || quarterText.includes('third') || quarterText.includes('3rd')) {
+            timeInfo.quarter = 'Q3';
+          } else if (quarterText.includes('4') || quarterText.includes('fourth') || quarterText.includes('4th')) {
+            timeInfo.quarter = 'Q4';
+          }
+          break;
+        }
+      }
+      
+      // Extract time patterns (hours with AM/PM)
+      const timePatterns = [
+        /\b(0?[1-9]|1[0-2]):([0-5][0-9])\s*(am|pm)\b/i,  // 9:30 AM, 2:45 PM
+        /\b(0?[1-9]|1[0-2])\s*(am|pm)\b/i,                 // 9 AM, 2 PM
+        /\b(0?[1-9]|1[0-2]):([0-5][0-9])\b/,              // 9:30, 14:30 (24-hour)
+        /\b([0-9]|1[0-9]|2[0-3]):([0-5][0-9])\b/          // 24-hour format
+      ];
+      
+      for (const pattern of timePatterns) {
+        const timeMatch = strValue.match(pattern);
+        if (timeMatch && !timeInfo.hour) {
+          let hour = parseInt(timeMatch[1]);
+          const minutes = timeMatch[2] ? parseInt(timeMatch[2]) : 0;
+          
+          // Handle AM/PM
+          if (timeMatch[3]) {
+            const ampm = timeMatch[3].toLowerCase();
+            if (ampm === 'pm' && hour !== 12) {
+              hour += 12;
+            } else if (ampm === 'am' && hour === 12) {
+              hour = 0;
+            }
+            timeInfo.ampm = ampm.toUpperCase();
+          } else if (hour > 12) {
+            // 24-hour format, determine AM/PM
+            if (hour >= 12) {
+              timeInfo.ampm = 'PM';
+              if (hour > 12) hour -= 12;
+            } else {
+              timeInfo.ampm = 'AM';
+            }
+          }
+          
+          timeInfo.hour = hour;
+          break;
+        }
+      }
+    }
+    
+    // Auto-classify quarter based on month if not already set
+    if (timeInfo.month && !timeInfo.quarter) {
+      const monthIndex = this.monthNames.indexOf(timeInfo.month.toLowerCase());
+      if (monthIndex >= 0) {
+        if (monthIndex < 3) timeInfo.quarter = 'Q1';
+        else if (monthIndex < 6) timeInfo.quarter = 'Q2';
+        else if (monthIndex < 9) timeInfo.quarter = 'Q3';
+        else timeInfo.quarter = 'Q4';
+      }
+    }
+    
+    return {
+      year: timeInfo.year,
+      month: timeInfo.month,
+      quarter: timeInfo.quarter
+    };
+  }
+
+  /**
+   * Extract dimensions from row data
+   */
+  private extractDimensions(rowData: any[], columnNames: string[]): Record<string, any> {
+    const dimensions: Record<string, any> = {};
+    
+    for (let i = 0; i < rowData.length; i++) {
+      const value = rowData[i];
+      const colName = columnNames[i];
+      
+      if (value !== null && value !== undefined && value !== '') {
+        // Store the original value exactly as it appears in Excel
+        // This preserves values like "CUST_001", "PROD_002", "SKU-001", etc.
+        // No normalization or transformation - keep original format
+        dimensions[colName] = value;
+      }
+    }
+    
+    return dimensions;
+  }
+
+  /**
+   * Check if a value is a coded identifier
+   */
+  private isCodedValue(value: string): boolean {
+    if (!value || typeof value !== 'string') return false;
+    
+    // Pattern 1: UPPERCASE_123 (e.g., CUST_001, PROD_002)
+    const pattern1 = /^[A-Z]+\_\d+$/;
+    
+    // Pattern 2: UPPERCASE123 (e.g., CUST001, PROD002)
+    const pattern2 = /^[A-Z]+\d+$/;
+    
+    // Pattern 3: UPPERCASE-123 (e.g., SKU-001, ITEM-002)
+    const pattern3 = /^[A-Z]+\-\d+$/;
+    
+    return pattern1.test(value) || pattern2.test(value) || pattern3.test(value);
+  }
+
+  /**
+   * Check if a value is a date
+   */
+  private isDateValue(val: any): boolean {
+    if (val === null || val === undefined) return false;
+    
+    // If it's already a Date object
+    if (val instanceof Date) return true;
+    
+    // If it's a number, check if it's an Excel date (Excel dates are numbers > 1)
+    if (typeof val === "number") {
+      return val > 1 && val < 100000; // Excel date range: 1900-01-01 to 9999-12-31
+    }
+    
+    // If it's a string, check for date patterns
+    if (typeof val === "string") {
+      // Common date patterns
+      const datePatterns = [
+        /^\d{1,2}\/\d{1,2}\/\d{2,4}$/,           // MM/DD/YYYY or M/D/YY
+        /^\d{1,2}-\d{1,2}-\d{2,4}$/,             // MM-DD-YYYY or M-D-YY
+        /^\d{4}-\d{1,2}-\d{1,2}$/,               // YYYY-MM-DD
+        /^\d{1,2}\/\d{1,2}\/\d{2,4}$/,           // DD/MM/YYYY
+        /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2},?\s+\d{4}$/i, // Jan 15, 2023
+        /^\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{4}$/i,   // 15 Jan 2023
+        /^q[1-4]\s+\d{4}$/i,                      // Q1 2023, Q2 2024
+        /^quarter\s*[1-4]\s+\d{4}$/i,             // Quarter 1 2023
+        /^fy\s*\d{2,4}$/i,                        // FY23, FY2023
+        /^fiscal\s*(year|yr)\s*\d{2,4}$/i         // Fiscal Year 23
+      ];
+      
+      return datePatterns.some(pattern => pattern.test(val.trim()));
+    }
+    
+    return false;
+  }
+
+  /**
+   * Parse numeric value from various formats
+   */
+  private parseNumericValue(val: any): number | null {
+    if (val === null || val === undefined) return null;
+    
+    // If it's already a number, return it if valid
+    if (typeof val === "number") {
+      return !isNaN(val) && isFinite(val) ? val : null;
+    }
+    
+    // If it's a string, try to parse it
+    if (typeof val === "string") {
+      // Remove common Excel formatting
+      const cleanVal = val.replace(/[$,%,\s]/g, '').replace(/,/g, '');
+      
+      // Try to parse as number
+      const parsed = parseFloat(cleanVal);
+      return !isNaN(parsed) && isFinite(parsed) ? parsed : null;
+    }
+    
+    return null;
+  }
+
+  /**
+   * Check if a value is numeric
+   */
+  private isNumeric(val: any): boolean {
+    if (val === null || val === undefined) return false;
+    
+    if (typeof val === "number") {
+      return !isNaN(val) && isFinite(val);
+    }
+    
+    if (typeof val === "string") {
+      const cleanVal = val.replace(/[$,%,\s]/g, '').replace(/,/g, '');
+      const parsed = parseFloat(cleanVal);
+      return !isNaN(parsed) && isFinite(parsed);
+    }
+    
+    return false;
+  }
+
+  /**
+   * Determine data type
+   */
+  private determineDataType(value: any, metric: string): "number" | "string" | "date" | "percent" | "ratio" {
+    if (typeof value === "number") return "number";
+    
+    const lowerMetric = metric.toLowerCase();
+    if (lowerMetric.includes("margin") || lowerMetric.includes("rate") || lowerMetric.includes("%")) return "percent";
+    if (lowerMetric.includes("ratio")) return "ratio";
+    
+    return "number";
+  }
+
+  /**
+   * Determine unit for the metric
+   */
+  private determineUnit(metric: string): string {
+    const lower = metric.toLowerCase();
+    if (lower.includes("margin") || lower.includes("rate") || lower.includes("%")) return "percentage";
+    if (lower.includes("ratio")) return "ratio";
+    return "INR";
+  }
+
+  /**
+   * Determine features for the cell
+   */
+  private determineFeatures(
+    metric: string,
+    value: any,
+    rowIndex: number,
+    dataStartRow: number
+  ): EnhancedParsedCell["features"] {
+    const lowerMetric = metric.toLowerCase();
+    
+    return {
+      isPercentage: lowerMetric.includes("margin") || lowerMetric.includes("rate") || lowerMetric.includes("%"),
+      isMargin: lowerMetric.includes("margin") || lowerMetric.includes("profit"),
+      isGrowth: lowerMetric.includes("growth") || lowerMetric.includes("yoy") || lowerMetric.includes("qoq"),
+      isAggregation: lowerMetric.includes("total") || lowerMetric.includes("sum") || lowerMetric.includes("average"),
+      isForecast: lowerMetric.includes("forecast") || lowerMetric.includes("budget") || lowerMetric.includes("projection"),
+      isHeader: rowIndex === dataStartRow,
+      isData: true,
+      isTotal: lowerMetric.includes("total"),
+    };
+  }
 }
 
-function determineUnit(metric: string): string {
-  const lower = metric.toLowerCase();
-  if (lower.includes("margin") || lower.includes("rate") || lower.includes("%")) return "%";
-  if (lower.includes("ratio")) return "ratio";
-  return "INR";
-}
+// Export singleton instance for backward compatibility
+export const excelParser = new ExcelParser();
 
-function determineFeatures(
-  metric: string,
-  value: any,
-  dataType: string
-): EnhancedParsedCell["features"] {
-  const lowerMetric = metric.toLowerCase();
-  return {
-    isPercentage: dataType === "percent" || lowerMetric.includes("margin"),
-    isMargin: lowerMetric.includes("margin") || lowerMetric.includes("profit"),
-    isGrowth: lowerMetric.includes("growth") || lowerMetric.includes("yoy") || lowerMetric.includes("qoq"),
-    isAggregation: lowerMetric.includes("total") || lowerMetric.includes("sum") || lowerMetric.includes("average"),
-    isForecast: lowerMetric.includes("forecast") || lowerMetric.includes("budget"),
-    isUniqueIdentifier: false,
-  };
-}
+// Legacy function export for backward compatibility
+export const parseAnd_upload_cells = excelParser.parseAndUploadCells.bind(excelParser);

@@ -24,7 +24,7 @@ export interface LLMConfig {
 export const llmConfig: LLMConfig = {
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || 'AIzaSyBcAwm2APnl4vWQw6ro8LiXtPbnCJsUmkI',
-    model: 'gemini-1.5-flash',
+    model: 'gemini-2.5-flash',
     temperature: 0.3,
     maxTokens: 1000
   },

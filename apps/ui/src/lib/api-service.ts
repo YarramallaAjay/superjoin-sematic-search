@@ -10,8 +10,8 @@ export interface UploadResponse {
   workbookId?: string;
   cellCount?: number;
   status?: string;
-  storageResult?: any;
-  embeddingResult?: any;
+  storageResult?: Record<string, unknown>;
+  embeddingResult?: Record<string, unknown>;
 }
 
 export interface ProcessingStatus {

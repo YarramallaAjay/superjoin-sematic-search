@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { config } from 'dotenv';
+import { EnhancedSearch } from '../../../../../embedder/enhanced-search';
 
 // Load environment variables
 config({ path: '.env.local' });
@@ -17,16 +18,14 @@ export async function POST(request: NextRequest) {
 
     // Try to use the core backend if available
     try {
-      // Dynamic import of the core backend
-      const enhancedSearchModule = await import('../../../../../embedder/enhanced-search');
-      const EnhancedSearch = enhancedSearchModule.EnhancedSearch;
+      // Initialize the EnhancedSearch instance
+      const search = new EnhancedSearch();
       
-      // Initialize and connect to the search system
-      const enhancedSearch = new EnhancedSearch();
-      await enhancedSearch.connect();
+      // Connect to the database
+      await search.connect();
       
       // Perform the semantic search
-      const results = await enhancedSearch.semanticSearch({
+      const results = await search.semanticSearch({
         query,
         tenantId,
         workbookId,
@@ -36,6 +35,9 @@ export async function POST(request: NextRequest) {
       if (!results) {
         throw new Error('No search results returned');
       }
+
+      // Clean up the connection
+      await search.disconnect();
 
       console.log(`✅ Search completed successfully for query: "${query}"`);
       return NextResponse.json(results);
@@ -61,12 +63,30 @@ export async function POST(request: NextRequest) {
             tenantId,
             workbookId,
             sheetId: 'sheet_1',
-            semanticString: 'Revenue | Global | 2023',
+            sheetName: 'Fallback Sheet',
+            rowName: 'Global',
+            colName: 'Revenue',
+            rowIndex: 1,
+            colIndex: 1,
+            cellAddress: 'A1',
+            dataType: 'number',
+            unit: 'USD',
+            features: {
+              isPercentage: false,
+              isMargin: false,
+              isGrowth: false,
+              isAggregation: false,
+              isForecast: false,
+              isUniqueIdentifier: false
+            },
+            sourceCell: 'A1',
+            sourceFormula: '',
             metric: 'Revenue',
-            normalizedMetric: 'revenue',
             value: 1000000,
             year: 2023,
-            score: 0.5
+            month: undefined,
+            quarter: undefined,
+            dimensions: {}
           }
         ],
         llmResponse: {
@@ -74,8 +94,10 @@ export async function POST(request: NextRequest) {
           confidence: 0.3,
           reasoning: "Fallback mode due to backend connection issues",
           dataPoints: 1,
-          sources: ["Fallback data"]
+          sources: ["Fallback data"],
+          generatedTable: ""
         },
+        generatedTable: "",
         searchMetadata: {
           queryEnhancementTime: 100,
           vectorSearchTime: 0,

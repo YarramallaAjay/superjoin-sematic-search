@@ -1,4 +1,4 @@
-{
+const semanticDictionary = {
   "metrics": {
     "Revenue": ["sales", "turnover", "topline", "gross income", "income", "revenue", "sales revenue", "total sales", "gross revenue", "net sales", "operating revenue"],
     "Gross Profit": ["gross margin", "gp", "gross profit", "gross income", "gross earnings", "gross profit margin", "gross profit %"],
@@ -51,14 +51,14 @@
     "Medium": ["medium", "normal", "standard", "priority 2", "moderate", "average", "regular", "typical", "usual"],
     "Low": ["low", "minor", "low priority", "priority 3", "minimal", "insignificant", "trivial", "non-critical", "optional"]
   },
-  "operations": {
-    "Sales": ["sales", "selling", "revenue generation", "business development", "sales operations", "sales process"],
-    "Marketing": ["marketing", "advertising", "promotion", "brand awareness", "lead generation", "market development"],
-    "Finance": ["finance", "financial", "accounting", "treasury", "financial management", "financial planning"],
-    "Operations": ["operations", "operational", "business operations", "day to day", "operational efficiency", "process management"],
-    "HR": ["hr", "human resources", "personnel", "staffing", "recruitment", "employee management", "workforce"],
-    "IT": ["it", "information technology", "tech", "technology", "systems", "digital", "automation", "software"]
-  },
+      "operations": {
+      "Sales": ["sales", "selling", "revenue generation", "business development", "sales operations", "sales process"],
+      "Marketing": ["marketing", "advertising", "promotion", "brand awareness", "lead generation", "market development"],
+      "Finance": ["finance", "financial", "accounting", "treasury", "financial management", "financial planning"],
+      "Operations": ["operations", "operational", "business operations", "day to day", "operational efficiency", "process management"],
+      "HR": ["hr", "human resources", "personnel", "staffing", "recruitment", "employee management", "workforce", "complaints", "hr complaints", "employee complaints"],
+      "IT": ["it", "information technology", "tech", "technology", "systems", "digital", "automation", "software"]
+    },
   "performance": {
     "Efficiency": ["efficiency", "productivity", "performance", "effectiveness", "optimization", "streamlining", "improvement"],
     "Quality": ["quality", "standards", "excellence", "reliability", "consistency", "accuracy", "precision"],

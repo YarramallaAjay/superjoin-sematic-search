@@ -32,31 +32,40 @@ const SheetSchema = new Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
-// Cell (AtlasCell)
+// Cell (AtlasCell) - Updated for new interface
 const AtlasCellSchema = new Schema({
   _id: { type: String, required: true },
   tenantId: { type: String, required: true, index: true },
   workbookId: { type: String, required: true, index: true },
   sheetId: { type: String, required: true, index: true },
 
-  // Structured fields
-  sheetName: String,
-  metric: String,              // e.g. "EBITDA Margin", "Net Sales"
-  year: Number,
-  quarter: { type: String, enum: ["Q1", "Q2", "Q3", "Q4"] },
-  month: String,
-  region: String,
-  product: String,
-  customer: String,
+  // Precise cell location
+  sheetName: { type: String, required: true },
+  rowIndex: Number,
+  colIndex: Number,
+  rowName: String,
+  colName: String,
+  cellAddress: String,
 
-  // Semantic string for embeddings
+  // Raw and parsed values
+  rawValue: Schema.Types.Mixed,
+  value: Schema.Types.Mixed,
+  metric: String,              // e.g. "EBITDA Margin", "Net Sales"
+
+  // Semantic string for embedding
   semanticString: { type: String, required: true },
 
-  // Actual cell values
-  value: Schema.Types.Mixed,
-  unit: { type: String, default: "INR" },
-  dataType: { type: String, enum: ["number", "string", "date", "percent", "ratio"] },
+  // Time dimensions (year, month, quarter)
+  year: Number,
+  month: String,
+  quarter: { type: String, enum: ["Q1", "Q2", "Q3", "Q4"] },
 
+  // All dimensions (preserved as-is)
+  dimensions: { type: Schema.Types.Mixed, default: {} },
+
+  // Data type and features
+  dataType: { type: String, enum: ["number", "string", "date", "percent", "ratio"] },
+  unit: { type: String, default: "INR" },
   features: {
     isPercentage: { type: Boolean, default: false },
     isMargin: { type: Boolean, default: false },
@@ -76,7 +85,8 @@ const AtlasCellSchema = new Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
-export const TenantModel = model("Tenant", TenantSchema);
-export const WorkbookModel = model("Workbook", WorkbookSchema);
-export const SheetModel = model("Sheet", SheetSchema);
-export const AtlasCellModel = model("AtlasCell", AtlasCellSchema);
+// Prevent model recompilation in development
+export const TenantModel = mongoose.models.tenants || model("tenants", TenantSchema);
+export const WorkbookModel = mongoose.models.workbooks || model("workbooks", WorkbookSchema);
+export const SheetModel = mongoose.models.sheets || model("sheets", SheetSchema);
+export const AtlasCellModel = mongoose.models.atlascells || model("atlascells", AtlasCellSchema);

@@ -1,820 +1,750 @@
 "use client";
-import { useState } from "react";
+
+import { useState, useRef, useEffect, useMemo } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Search, Database, Brain, TrendingUp, Users, Settings, Upload, FileSpreadsheet, CheckCircle, AlertCircle, Loader2 } from "lucide-react";
-import { ChatInterface } from "@/components/chat-interface";
 import { Progress } from "@/components/ui/progress";
-import { apiService } from "@/lib/api-service";
-
-interface SearchResult {
-  _id: string;
-  tenantId: string;
-  workbookId: string;
-  sheetId: string;
-  semanticString: string;
-  metric: string;
-  normalizedMetric: string;
-  value: number | string;
-  year?: number;
-  quarter?: string;
-  month?: string;
-  region?: string;
-  product?: string;
-  customerId?: string;
-  customerName?: string;
-  department?: string;
-  status?: string;
-  priority?: string;
-  score: number;
-}
-
-interface LLMResponse {
-  answer: string;
-  confidence: number;
-  reasoning: string;
-  dataPoints: number;
-  sources: string[];
-}
+import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Upload, Search, FileText, MessageSquare, CheckCircle, AlertCircle, Loader2 } from "lucide-react";
+import { apiService, UploadResponse, SearchResponse, Workbook } from "./services/api-service";
+import { useToast } from "./hooks/use-toast";
 
 interface UploadStatus {
+  fileName?: string;
   isUploading: boolean;
   isProcessing: boolean;
   progress: number;
-  status: 'idle' | 'uploading' | 'processing' | 'completed' | 'error';
   message: string;
-  fileName?: string;
   tenantId?: string;
   workbookId?: string;
   cellCount?: number;
   timestamp?: string;
 }
 
-export default function Dashboard() {
-  const [query, setQuery] = useState("");
-  const [tenantId, setTenantId] = useState("tenant_test_enhanced");
-  const [workbookId, setWorkbookId] = useState("Company Financial Model MultiYear");
-  const [isSearching, setIsSearching] = useState(false);
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [llmResponse, setLlmResponse] = useState<LLMResponse | null>(null);
-  const [activeTab, setActiveTab] = useState("upload");
+export default function Home() {
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>({
     isUploading: false,
     isProcessing: false,
     progress: 0,
-    status: 'idle',
-    message: 'Ready to upload Excel files',
-    fileName: '',
-    tenantId: '',
-    workbookId: '',
-    cellCount: 0
+    message: "Ready to upload"
   });
-  const [isDragOver, setIsDragOver] = useState(false);
-
-  const handleSearch = async (searchQuery?: string) => {
-    const queryToSearch = searchQuery || query;
-    if (!queryToSearch.trim()) return { llmResponse: undefined };
+  
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResponse | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
+  const [workbooks, setWorkbooks] = useState<Workbook[]>([]);
+  const [selectedWorkbook, setSelectedWorkbook] = useState<Workbook | null>(null);
+  const [isLoadingWorkbooks, setIsLoadingWorkbooks] = useState(false);
+  
+  // Table state variables
+  const [tableSearchTerm, setTableSearchTerm] = useState('');
+  const [tableSortBy, setTableSortBy] = useState('semanticString');
+  const [tableSortOrder, setTableSortOrder] = useState<'asc' | 'desc'>('asc');
+  
+  // Computed filtered and sorted table data
+  const filteredTableData = useMemo(() => {
+    if (!searchResults?.structuredData) return [];
     
-    setIsSearching(true);
+    let filtered = searchResults.structuredData;
+    
+    // Apply search filter
+    if (tableSearchTerm) {
+      const searchLower = tableSearchTerm.toLowerCase();
+      filtered = filtered.filter(item =>
+        Object.values(item).some(value => 
+          value && value.toString().toLowerCase().includes(searchLower)
+        )
+      );
+    }
+    
+    // Apply sorting
+    filtered.sort((a, b) => {
+      let aValue = a[tableSortBy as keyof typeof a];
+      let bValue = b[tableSortBy as keyof typeof b];
+      
+      // Handle null/undefined values
+      if (aValue == null) aValue = '';
+      if (bValue == null) bValue = '';
+      
+      // Convert to strings for comparison
+      const aStr = String(aValue).toLowerCase();
+      const bStr = String(bValue).toLowerCase();
+      
+      if (tableSortOrder === 'asc') {
+        return aStr.localeCompare(bStr);
+      } else {
+        return bStr.localeCompare(aStr);
+      }
+    });
+    
+    return filtered;
+  }, [searchResults?.structuredData, tableSearchTerm, tableSortBy, tableSortOrder]);
+  
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { toast, toasts, dismiss } = useToast();
+
+  // Load workbooks on component mount
+  useEffect(() => {
+    loadWorkbooks();
+  }, []);
+
+  const loadWorkbooks = async () => {
     try {
-      const data = await apiService.performSearch({ 
-        query: queryToSearch, 
-        tenantId, 
-        workbookId 
+      console.log('🔄 Loading workbooks...');
+      setIsLoadingWorkbooks(true);
+      const response = await apiService.fetchWorkbooks();
+      console.log('📡 API response:', response);
+      
+      if (response.success) {
+        setWorkbooks(response.workbooks);
+        console.log(`✅ Loaded ${response.workbooks.length} workbooks:`, response.workbooks);
+      } else {
+        console.error('❌ API returned success: false:', response.error);
+        toast({
+          title: "Error",
+          description: `Failed to load workbooks: ${response.error}`,
+          variant: "destructive"
+        });
+      }
+    } catch (error) {
+      console.error('❌ Failed to load workbooks:', error);
+      toast({
+        title: "Error",
+        description: `Failed to load available workbooks: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        variant: "destructive"
       });
+    } finally {
+      setIsLoadingWorkbooks(false);
+      console.log('🔄 Workbook loading completed');
+    }
+  };
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Reset status
+    setUploadStatus({
+      fileName: file.name,
+      isUploading: true,
+      isProcessing: false,
+      progress: 0,
+      message: "Starting upload..."
+    });
+
+    try {
+      // Update progress to 10%
+      setUploadStatus(prev => ({
+        ...prev,
+        progress: 10,
+        message: "Uploading file..."
+      }));
+
+      // Upload file
+      const uploadResult = await apiService.uploadExcelFile(file);
       
-      setSearchResults(data.structuredData || []);
-      setLlmResponse(data.llmResponse || null);
-      setActiveTab("results");
+      if (uploadResult.success) {
+        // Update progress to 20%
+        setUploadStatus(prev => ({
+          ...prev,
+          progress: 20,
+          message: "File uploaded, processing..."
+        }));
+
+        // Update progress to 40%
+        setUploadStatus(prev => ({
+          ...prev,
+          progress: 40,
+          message: "Parsing Excel data..."
+        }));
+
+        // Update progress to 60%
+        setUploadStatus(prev => ({
+          ...prev,
+          progress: 60,
+          message: "Creating embeddings..."
+        }));
+
+        // Update progress to 80%
+        setUploadStatus(prev => ({
+          ...prev,
+          progress: 80,
+          message: "Storing data..."
+        }));
+
+        // Final progress update
+        setUploadStatus(prev => ({
+          ...prev,
+          progress: 100,
+          message: "Upload completed successfully!",
+          isUploading: false,
+          isProcessing: false,
+          tenantId: uploadResult.tenantId,
+          workbookId: uploadResult.workbookId,
+          cellCount: uploadResult.cellCount
+        }));
+
+        // Reload workbooks to include the new one
+        await loadWorkbooks();
+
+        toast({
+          title: "Success",
+          description: `File uploaded successfully! Processed ${uploadResult.cellCount} cells.`,
+        });
+
+        // Clear file input
+        if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+        }
+      } else {
+        throw new Error(uploadResult.error || 'Upload failed');
+      }
+    } catch (error) {
+      console.error('Upload error:', error);
+      setUploadStatus(prev => ({
+        ...prev,
+        isUploading: false,
+        isProcessing: false,
+        progress: 0,
+        message: `Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+      }));
+
+      toast({
+        title: "Upload Failed",
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+        variant: "destructive"
+      });
+    }
+  };
+
+  const handleSearch = async () => {
+    if (!searchQuery.trim()) {
+      toast({
+        title: "Error",
+        description: "Please enter a search query",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    if (!selectedWorkbook) {
+      toast({
+        title: "Error",
+        description: "Please select a workbook first",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    try {
+      setIsSearching(true);
+      const results = await apiService.searchWithWorkbook(
+        searchQuery,
+        selectedWorkbook.id,
+        selectedWorkbook.tenantId
+      );
       
-      // Show success toast
-      showToast("Search completed", `Found ${data.structuredData?.length || 0} results`, "success");
+      setSearchResults(results);
       
-      return data;
-    } catch {
-      showToast("Search failed", "Please try again", "error");
-      return { llmResponse: undefined };
+      if (results.success) {
+        toast({
+          title: "Search Complete",
+          description: `Found ${results.structuredData?.length || 0} results`,
+        });
+      } else {
+        toast({
+          title: "Search Failed",
+          description: results.error || 'Search failed',
+          variant: "destructive"
+        });
+      }
+    } catch (error) {
+      console.error('Search error:', error);
+      toast({
+        title: "Search Error",
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+        variant: "destructive"
+      });
     } finally {
       setIsSearching(false);
     }
   };
 
-  const handleSearchClick = () => {
-    handleSearch();
-  };
-
-  const showToast = (title: string, message: string, type: 'success' | 'error' | 'info' = 'info') => {
-    // Simple toast implementation - you can replace this with a proper toast library
-    const toast = document.createElement('div');
-    toast.className = `fixed top-4 right-4 z-50 p-4 rounded-lg shadow-lg max-w-sm transform transition-all duration-300 ${
-      type === 'success' ? 'bg-green-500 text-white' :
-      type === 'error' ? 'bg-red-500 text-white' :
-      'bg-blue-500 text-white'
-    }`;
-    toast.innerHTML = `
-      <div class="font-semibold">${title}</div>
-      <div class="text-sm opacity-90">${message}</div>
-    `;
-    document.body.appendChild(toast);
+  const handleWorkbookSelect = (workbookId: string) => {
+    const workbook = workbooks.find(wb => wb.id === workbookId);
+    setSelectedWorkbook(workbook || null);
     
-    setTimeout(() => {
-      toast.style.transform = 'translateX(100%)';
-      setTimeout(() => document.body.removeChild(toast), 300);
-    }, 3000);
-  };
-
-  const handleFileUpload = async (file: File) => {
-    if (!file) return;
-
-    const timestamp = new Date().toISOString();
-    setUploadStatus({
-      isUploading: true,
-      isProcessing: false,
-      status: 'uploading',
-      progress: 0,
-      message: 'Starting upload...',
-      fileName: file.name,
-      timestamp,
-      tenantId: '',
-      workbookId: '',
-      cellCount: 0
-    });
-
-    try {
-      // Step 1: File Upload (10% of progress)
-      setUploadStatus(prev => ({ ...prev, progress: 10, message: 'Uploading file...' }));
-      
-      const uploadResult = await apiService.uploadExcelFile(file);
-      
-      if (uploadResult.success) {
-        // Step 2: File Processing (20% of progress)
-        setUploadStatus(prev => ({ 
-          ...prev, 
-          progress: 20, 
-          message: 'Processing Excel file...',
-          tenantId: uploadResult.tenantId || '',
-          workbookId: uploadResult.workbookId || '',
-          cellCount: uploadResult.cellCount || 0
-        }));
-
-        // Step 3: Parsing and Embeddings (40% of progress)
-        setUploadStatus(prev => ({ 
-          ...prev, 
-          progress: 40, 
-          message: 'Generating embeddings...',
-          isProcessing: true
-        }));
-
-        // Step 4: Database Storage (60% of progress)
-        setUploadStatus(prev => ({ 
-          ...prev, 
-          progress: 60, 
-          message: 'Storing data in database...'
-        }));
-
-        // Step 5: Final Processing (80% of progress)
-        setUploadStatus(prev => ({ 
-          ...prev, 
-          progress: 80, 
-          message: 'Finalizing...'
-        }));
-
-        // Step 6: Complete (100% of progress)
-        setUploadStatus(prev => ({ 
-          ...prev, 
-          progress: 100, 
-          message: 'Upload completed successfully!',
-          status: 'completed',
-          isUploading: false,
-          isProcessing: false
-        }));
-
-        // Show success toast
-        showToast("Upload Successful!", `File processed: ${uploadResult.cellCount} cells parsed and stored.`, "success");
-
-        // Auto-switch to Search tab after successful upload
-        setTimeout(() => {
-          setActiveTab('search');
-        }, 2000);
-
-      } else {
-        // Handle upload failure
-        setUploadStatus(prev => ({ 
-          ...prev, 
-          progress: 0, 
-          message: 'Upload failed',
-          status: 'error',
-          isUploading: false,
-          isProcessing: false
-        }));
-
-        showToast("Upload Failed", uploadResult.message || 'An error occurred during upload.', "error");
-      }
-    } catch (error) {
-      console.error('Upload error:', error);
-      setUploadStatus(prev => ({ 
-        ...prev, 
-        progress: 0, 
-        message: 'Upload failed',
-        status: 'error',
-        isUploading: false,
-        isProcessing: false
-      }));
-
-      showToast("Upload Error", error instanceof Error ? error.message : 'An unexpected error occurred.', "error");
-    }
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(true);
-  };
-
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(false);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(false);
-    const files = e.dataTransfer.files;
-    if (files.length > 0) {
-      handleFileUpload(files[0]);
-    }
-  };
-
-  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (files && files.length > 0) {
-      handleFileUpload(files[0]);
-    }
-  };
-
-  const getStatusIcon = () => {
-    switch (uploadStatus.status) {
-      case 'completed':
-        return <CheckCircle className="h-8 w-8 text-green-500" />;
-      case 'error':
-        return <AlertCircle className="h-8 w-8 text-red-500" />;
-      case 'processing':
-      case 'uploading':
-        return <Loader2 className="h-8 w-8 text-blue-500 animate-spin" />;
-      default:
-        return <FileSpreadsheet className="h-8 w-8 text-gray-400" />;
-    }
-  };
-
-  const getStatusColor = () => {
-    switch (uploadStatus.status) {
-      case 'completed':
-        return 'text-green-600';
-      case 'error':
-        return 'text-red-600';
-      case 'processing':
-      case 'uploading':
-        return 'text-blue-600';
-      default:
-        return 'text-gray-600';
+    if (workbook) {
+      toast({
+        title: "Workbook Selected",
+        description: `Selected: ${workbook.name} (${workbook.tenantName})`,
+      });
     }
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
-      {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="p-2 bg-blue-100 rounded-lg">
-              <Database className="h-6 w-6 text-blue-600" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-gray-900">Semantic Search Dashboard</h1>
-              <p className="text-sm text-gray-600">AI-powered financial data analysis</p>
-            </div>
-          </div>
-          <div className="flex items-center space-x-4">
-            <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">
-              <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
-              Connected
-            </Badge>
-            <Button 
-              variant="outline" 
-              size="sm"
-              onClick={async () => {
-                try {
-                  const result = await apiService.testLLMConnection();
-                  showToast(
-                    "LLM Test Results", 
-                    `Google: ${result.google ? '✅' : '❌'}, DeepSeek: ${result.deepseek ? '✅' : '❌'}, OpenAI: ${result.openai ? '✅' : '❌'}`,
-                    result.google || result.deepseek || result.openai ? 'success' : 'error'
-                  );
-                } catch (error) {
-                  showToast("LLM Test Failed", "Could not test LLM connections", "error");
-                }
-              }}
+    <div className="min-h-screen bg-gray-50 p-6">
+      {/* Toast Notifications */}
+      <div className="fixed top-4 right-4 z-50 space-y-2">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className={`p-4 rounded-lg shadow-lg max-w-sm transform transition-all duration-300 ${
+              toast.variant === 'destructive' 
+                ? 'bg-red-500 text-white' 
+                : 'bg-green-500 text-white'
+            }`}
+          >
+            <div className="font-semibold">{toast.title}</div>
+            <div className="text-sm opacity-90">{toast.description}</div>
+            <button
+              onClick={() => dismiss(toast.id)}
+              className="absolute top-2 right-2 text-white opacity-70 hover:opacity-100"
             >
-              <Brain className="h-4 w-4 mr-2" />
-              Test LLM
-            </Button>
-            <Button variant="outline" size="sm">
-              <Settings className="h-4 w-4 mr-2" />
-              Settings
-            </Button>
+              ×
+            </button>
           </div>
-        </div>
+        ))}
       </div>
 
-      {/* Main Content */}
-      <div className="px-6 py-6">
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="grid w-full grid-cols-5">
-            <TabsTrigger value="upload" className="flex items-center space-x-2">
-              <Upload className="h-4 w-4" />
-              <span>Upload</span>
-            </TabsTrigger>
-            <TabsTrigger value="chat" className="flex items-center space-x-2">
-              <Brain className="h-4 w-4" />
-              <span>Chat</span>
-            </TabsTrigger>
-            <TabsTrigger value="search" className="flex items-center space-x-2">
-              <Search className="h-4 w-4" />
-              <span>Search</span>
-            </TabsTrigger>
-            <TabsTrigger value="results" className="flex items-center space-x-2">
-              <Database className="h-4 w-4" />
-              <span>Results</span>
-            </TabsTrigger>
-            <TabsTrigger value="analytics" className="flex items-center space-x-2">
-              <TrendingUp className="h-4 w-4" />
-              <span>Analytics</span>
-            </TabsTrigger>
+      <div className="max-w-6xl mx-auto space-y-6">
+        {/* Header */}
+        <div className="text-center space-y-2">
+          <h1 className="text-4xl font-bold text-gray-900">SuperJoin Semantic Search</h1>
+          <p className="text-gray-600">Upload Excel files and search with AI-powered semantic understanding</p>
+        </div>
+
+        {/* Global Workbook Selector */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <FileText className="h-5 w-5" />
+              Select Workbook
+            </CardTitle>
+            <CardDescription>
+              Choose a workbook to search in. Upload a new file to create a new workbook.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center gap-4">
+              <Select
+                value={selectedWorkbook?.id || ""}
+                onValueChange={handleWorkbookSelect}
+                disabled={isLoadingWorkbooks}
+              >
+                <SelectTrigger className="w-80">
+                  <SelectValue placeholder={
+                    isLoadingWorkbooks ? "Loading workbooks..." : "Select a workbook"
+                  } />
+                </SelectTrigger>
+                <SelectContent>
+                  {workbooks.map((workbook) => (
+                    <SelectItem key={workbook.id} value={workbook.id}>
+                      <div className="flex flex-col">
+                        <span className="font-medium">{workbook.name}</span>
+                        <span className="text-sm text-gray-500">
+                          Tenant: {workbook.tenantName}
+                        </span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              
+              <Button
+                onClick={loadWorkbooks}
+                variant="outline"
+                size="sm"
+                disabled={isLoadingWorkbooks}
+              >
+                {isLoadingWorkbooks ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  "Refresh"
+                )}
+              </Button>
+            </div>
+            
+            {selectedWorkbook && (
+              <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-md">
+                <div className="flex items-center gap-2 text-green-800">
+                  <CheckCircle className="h-4 w-4" />
+                  <span className="font-medium">Selected:</span>
+                  <span>{selectedWorkbook.name}</span>
+                  <span className="text-sm">({selectedWorkbook.tenantName})</span>
+                </div>
+                <div className="text-sm text-green-600 mt-1">
+                  Workbook ID: {selectedWorkbook.id.slice(-8)} | 
+                  Tenant ID: {selectedWorkbook.tenantId.slice(-8)}
+                </div>
+              </div>
+            )}
+
+            {!isLoadingWorkbooks && workbooks.length === 0 && (
+              <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
+                <div className="flex items-center gap-2 text-yellow-800">
+                  <AlertCircle className="h-4 w-4" />
+                  <span className="font-medium">No workbooks available</span>
+                </div>
+                <div className="text-sm text-yellow-600 mt-1">
+                  Upload an Excel file to create your first workbook, or check if the database connection is working.
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Tabs defaultValue="upload" className="space-y-4">
+          <TabsList className="grid w-full grid-cols-2">
+            <TabsTrigger value="upload">Upload & Process</TabsTrigger>
+            <TabsTrigger value="search">Search & Chat</TabsTrigger>
           </TabsList>
 
-          {/* Upload Tab */}
-          <TabsContent value="upload" className="space-y-6">
-            <div className="grid gap-6">
-              {/* Upload Area */}
-              <Card className={`border-2 border-dashed transition-all duration-200 ${
-                isDragOver 
-                  ? 'border-blue-400 bg-blue-50 scale-105' 
-                  : 'border-gray-300 hover:border-blue-400'
-              }`}>
-                <CardContent className="p-8">
-                  <div
-                    className="text-center"
-                    onDragOver={handleDragOver}
-                    onDragLeave={handleDragLeave}
-                    onDrop={handleDrop}
-                  >
-                    <div className="flex flex-col items-center space-y-4">
-                      {getStatusIcon()}
-                      
-                      <div className="space-y-2">
-                        <h3 className={`text-lg font-semibold ${getStatusColor()}`}>
-                          {uploadStatus.message}
-                        </h3>
-                        {uploadStatus.fileName && (
-                          <p className="text-sm text-gray-600">
-                            File: {uploadStatus.fileName}
-                          </p>
-                        )}
-                      </div>
-
-                      {uploadStatus.status === 'idle' && (
-                        <>
-                                                      <p className="text-gray-500 max-w-md">
-                              Drag and drop your Excel files here, or click to browse. 
-                              We&apos;ll process the data and generate semantic embeddings for intelligent search.
-                            </p>
-                          
-                          <div className="flex space-x-4">
-                            <Button
-                              onClick={() => document.getElementById('file-upload')?.click()}
-                              className="bg-blue-600 hover:bg-blue-700"
-                            >
-                              <Upload className="h-4 w-4 mr-2" />
-                              Choose File
-                            </Button>
-                            <Button variant="outline">
-                              <FileSpreadsheet className="h-4 w-4 mr-2" />
-                              View Sample
-                            </Button>
-                          </div>
-                          
-                          <input
-                            id="file-upload"
-                            type="file"
-                            accept=".xlsx,.xls"
-                            onChange={handleFileInput}
-                            className="hidden"
-                          />
-                        </>
-                      )}
-
-                      {/* Progress Bar */}
-                      {(uploadStatus.status === 'uploading' || uploadStatus.status === 'processing') && (
-                        <div className="w-full max-w-md space-y-2">
-                          <Progress value={uploadStatus.progress} className="w-full" />
-                          <p className="text-sm text-gray-600">
-                            {uploadStatus.status === 'uploading' ? 'Uploading...' : 'Processing...'} {uploadStatus.progress}%
-                          </p>
-                        </div>
-                      )}
-
-                      {/* Success Actions */}
-                      {uploadStatus.status === 'completed' && (
-                        <div className="space-y-4">
-                          {/* Display Upload Results */}
-                          <div className="bg-green-50 border border-green-200 rounded-lg p-4 space-y-3">
-                            <h4 className="font-medium text-green-800">Upload Complete! 🎉</h4>
-                            <div className="grid grid-cols-2 gap-4 text-sm">
-                              <div>
-                                <span className="font-medium text-green-700">Tenant ID:</span>
-                                <div className="font-mono text-xs bg-white px-2 py-1 rounded border mt-1">
-                                  {uploadStatus.tenantId || 'N/A'}
-                                </div>
-                              </div>
-                              <div>
-                                <span className="font-medium text-green-700">Workbook ID:</span>
-                                <div className="font-mono text-xs bg-white px-2 py-1 rounded border mt-1">
-                                  {uploadStatus.workbookId || 'N/A'}
-                                </div>
-                              </div>
-                            </div>
-                            {uploadStatus.cellCount && (
-                              <div className="text-sm text-green-700">
-                                <span className="font-medium">Cells Processed:</span> {uploadStatus.cellCount}
-                              </div>
-                            )}
-                          </div>
-                          
-                          <div className="flex space-x-3">
-                            <Button
-                              onClick={() => setActiveTab("chat")}
-                              className="bg-green-600 hover:bg-green-700"
-                            >
-                              <Brain className="h-4 w-4 mr-2" />
-                              Start Chatting
-                            </Button>
-                            <Button
-                              onClick={() => setActiveTab("search")}
-                              variant="outline"
-                            >
-                              <Search className="h-4 w-4 mr-2" />
-                              Try Search
-                            </Button>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Error Actions */}
-                      {uploadStatus.status === 'error' && (
-                        <Button
-                          onClick={() => setUploadStatus({
-                            isUploading: false,
-                            isProcessing: false,
-                            progress: 0,
-                            status: 'idle',
-                            message: 'Ready to upload Excel files'
-                          })}
-                          variant="outline"
-                        >
-                          Try Again
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              {/* Upload Instructions */}
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center space-x-2">
-                    <FileSpreadsheet className="h-5 w-5" />
-                    <span>Upload Requirements</span>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="grid md:grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <h4 className="font-medium text-gray-900">Supported Formats</h4>
-                      <ul className="text-sm text-gray-600 space-y-1">
-                        <li>• Excel (.xlsx, .xls)</li>
-                        <li>• CSV files</li>
-                        <li>• Maximum file size: 50MB</li>
-                      </ul>
-                    </div>
-                    <div className="space-y-2">
-                      <h4 className="font-medium text-gray-900">Data Structure</h4>
-                      <ul className="text-sm text-gray-600 space-y-1">
-                        <li>• First row should contain headers</li>
-                        <li>• Include metrics, dimensions, and values</li>
-                        <li>• Time-based data (years, quarters, months)</li>
-                      </ul>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-          </TabsContent>
-
-          {/* Chat Tab */}
-          <TabsContent value="chat" className="space-y-6">
+          <TabsContent value="upload" className="space-y-4">
             <Card>
               <CardHeader>
-                <CardTitle className="flex items-center space-x-2">
-                  <Brain className="h-5 w-5" />
-                  <span>AI Chat Assistant</span>
+                <CardTitle className="flex items-center gap-2">
+                  <Upload className="h-5 w-5" />
+                  Upload Excel File
                 </CardTitle>
                 <CardDescription>
-                  Chat with your financial data using natural language. Ask questions about revenue, profits, trends, and more.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <ChatInterface onSearch={handleSearch} />
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          {/* Search Tab */}
-          <TabsContent value="search" className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center space-x-2">
-                  <Search className="h-5 w-5" />
-                  <span>Semantic Search</span>
-                </CardTitle>
-                <CardDescription>
-                  Search through your financial data using natural language queries.
+                  Upload an Excel file to process and create embeddings for semantic search
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="grid md:grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Tenant ID</label>
-                    {uploadStatus.tenantId ? (
-                      <div className="p-2 bg-gray-100 rounded border text-sm font-mono">
-                        {uploadStatus.tenantId}
-                      </div>
-                    ) : (
-                      <Select value={tenantId} onValueChange={setTenantId}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="tenant_test_enhanced">tenant_test_enhanced</SelectItem>
-                          <SelectItem value="tenant_prod">tenant_prod</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    )}
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Workbook</label>
-                    {uploadStatus.workbookId ? (
-                      <div className="p-2 bg-gray-100 rounded border text-sm font-mono">
-                        {uploadStatus.workbookId}
-                      </div>
-                    ) : (
-                      <Select value={workbookId} onValueChange={setWorkbookId}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="Company Financial Model MultiYear">Company Financial Model MultiYear</SelectItem>
-                          <SelectItem value="Sales Dashboard">Sales Dashboard</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    )}
-                  </div>
+                <div className="flex items-center gap-4">
+                  <Input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    onChange={handleFileUpload}
+                    disabled={uploadStatus.isUploading || uploadStatus.isProcessing}
+                  />
+                  <Button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploadStatus.isUploading || uploadStatus.isProcessing}
+                  >
+                    Choose File
+                  </Button>
                 </div>
-                
+
+                {/* Upload Progress */}
+                {uploadStatus.isUploading || uploadStatus.isProcessing ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-sm">
+                      <span>{uploadStatus.message}</span>
+                      <span>{uploadStatus.progress}%</span>
+                    </div>
+                    <Progress value={uploadStatus.progress} className="w-full" />
+                  </div>
+                ) : null}
+
+                {/* Upload Results */}
                 {uploadStatus.tenantId && uploadStatus.workbookId && (
-                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                    <p className="text-sm text-blue-800">
-                      <span className="font-medium">Using uploaded data:</span> {uploadStatus.fileName} 
-                      ({uploadStatus.cellCount || 0} cells processed)
-                    </p>
+                  <div className="p-4 bg-blue-50 border border-blue-200 rounded-md">
+                    <div className="flex items-center gap-2 text-blue-800 mb-2">
+                      <CheckCircle className="h-5 w-5" />
+                      <span className="font-medium">Upload Successful!</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-4 text-sm">
+                      <div>
+                        <span className="font-medium">Tenant ID:</span>
+                        <div className="font-mono text-xs bg-blue-100 p-1 rounded mt-1">
+                          {uploadStatus.tenantId}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="font-medium">Workbook ID:</span>
+                        <div className="font-mono text-xs bg-blue-100 p-1 rounded mt-1">
+                          {uploadStatus.workbookId}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="font-medium">Cells Processed:</span>
+                        <div className="text-lg font-bold text-blue-600">
+                          {uploadStatus.cellCount}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 )}
-                
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Query</label>
-                  <Textarea
-                    placeholder="What was the revenue in Q1 2023? Show me profit margins by region..."
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    rows={3}
-                  />
-                </div>
-                
-                <Button 
-                  onClick={handleSearchClick} 
-                  disabled={isSearching || !query.trim()}
-                  className="w-full"
-                >
-                  {isSearching ? (
-                    <>
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Searching...
-                    </>
-                  ) : (
-                    <>
-                      <Search className="h-4 w-4 mr-2" />
-                      Search
-                    </>
-                  )}
-                </Button>
+
+                {/* Error Display */}
+                {uploadStatus.message.includes('failed') && (
+                  <div className="flex items-center gap-2 text-red-600">
+                    <AlertCircle className="h-4 w-4" />
+                    <span>{uploadStatus.message}</span>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
 
-          {/* Results Tab */}
-          <TabsContent value="results" className="space-y-6">
+          <TabsContent value="search" className="space-y-4">
             <Card>
               <CardHeader>
-                <CardTitle className="flex items-center space-x-2">
-                  <Database className="h-5 w-5" />
-                  <span>Search Results</span>
+                <CardTitle className="flex items-center gap-2">
+                  <Search className="h-5 w-5" />
+                  Semantic Search
                 </CardTitle>
                 <CardDescription>
-                  {searchResults.length > 0 
-                    ? `Found ${searchResults.length} results for your query`
-                    : "No search results yet. Try searching for something!"
-                  }
+                  Search your uploaded data using natural language queries
                 </CardDescription>
               </CardHeader>
-              <CardContent>
-                {searchResults.length > 0 ? (
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <Badge variant="secondary">
-                        {searchResults.length} results
-                      </Badge>
-                      <Button variant="outline" size="sm">
-                        Export Results
-                      </Button>
+              <CardContent className="space-y-4">
+                <div className="flex items-center gap-4">
+                  <Input
+                    placeholder="Ask a question about your data..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
+                    disabled={!selectedWorkbook || isSearching}
+                  />
+                  <Button
+                    onClick={handleSearch}
+                    disabled={!selectedWorkbook || !searchQuery.trim() || isSearching}
+                  >
+                    {isSearching ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Search className="h-4 w-4" />
+                    )}
+                    Search
+                  </Button>
+                </div>
+
+                {!selectedWorkbook && (
+                  <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-md">
+                    <div className="flex items-center gap-2 text-yellow-800">
+                      <AlertCircle className="h-4 w-4" />
+                      <span>Please select a workbook above to enable search</span>
                     </div>
-                    
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Metric</TableHead>
-                          <TableHead>Value</TableHead>
-                          <TableHead>Year</TableHead>
-                          <TableHead>Quarter</TableHead>
-                          <TableHead>Region</TableHead>
-                          <TableHead>Score</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {searchResults.map((result, index) => (
-                          <TableRow key={index}>
-                            <TableCell className="font-medium">{result.metric}</TableCell>
-                            <TableCell>${result.value?.toLocaleString()}</TableCell>
-                            <TableCell>{result.year}</TableCell>
-                            <TableCell>{result.quarter}</TableCell>
-                            <TableCell>{result.region}</TableCell>
-                            <TableCell>
-                              <Badge variant={result.score > 0.8 ? "default" : "secondary"}>
-                                {(result.score * 100).toFixed(0)}%
-                              </Badge>
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
-                ) : (
-                  <div className="text-center py-8 text-gray-500">
-                    <Database className="h-12 w-12 mx-auto mb-4 text-gray-300" />
-                    <p>No search results to display</p>
-                    <p className="text-sm">Try searching for financial data or upload some Excel files first</p>
                   </div>
                 )}
-              </CardContent>
-            </Card>
 
-                         {/* AI Insights */}
-             {llmResponse && (
-               <Card>
-                 <CardHeader>
-                   <CardTitle className="flex items-center space-x-2">
-                     <Brain className="h-5 w-5" />
-                     <span>AI Insights</span>
-                   </CardTitle>
-                 </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="bg-blue-50 p-4 rounded-lg">
-                    <p className="text-blue-900">{llmResponse.answer}</p>
-                  </div>
-                  
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div>
-                      <span className="font-medium">Confidence:</span>
-                      <Badge variant="outline" className="ml-2">
-                        {(llmResponse.confidence * 100).toFixed(0)}%
-                      </Badge>
+                {/* Search Results */}
+                {searchResults && (
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2">
+                      <MessageSquare className="h-5 w-5" />
+                      <h3 className="text-lg font-semibold">Search Results</h3>
                     </div>
-                    <div>
-                      <span className="font-medium">Data Points:</span>
-                      <span className="ml-2">{llmResponse.dataPoints}</span>
-                    </div>
-                  </div>
-                  
-                  {llmResponse.reasoning && (
-                    <div className="text-sm text-gray-600">
-                      <span className="font-medium">Reasoning:</span> {llmResponse.reasoning}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            )}
-          </TabsContent>
 
-          {/* Analytics Tab */}
-          <TabsContent value="analytics" className="space-y-6">
-            <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
-              <Card>
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">Total Documents</CardTitle>
-                  <Database className="h-4 w-4 text-muted-foreground" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">2,847</div>
-                  <p className="text-xs text-muted-foreground">
-                    +20.1% from last month
-                  </p>
-                </CardContent>
-              </Card>
-              
-              <Card>
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">Search Queries</CardTitle>
-                  <Search className="h-4 w-4 text-muted-foreground" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">1,234</div>
-                  <p className="text-xs text-muted-foreground">
-                    +12.3% from last month
-                  </p>
-                </CardContent>
-              </Card>
-              
-              <Card>
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">AI Responses</CardTitle>
-                  <Brain className="h-4 w-4 text-muted-foreground" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">98.2%</div>
-                  <p className="text-xs text-muted-foreground">
-                    +2.1% from last month
-                  </p>
-                </CardContent>
-              </Card>
-              
-              <Card>
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">Active Users</CardTitle>
-                  <Users className="h-4 w-4 text-muted-foreground" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">156</div>
-                  <p className="text-xs text-muted-foreground">
-                    +8.7% from last month
-                  </p>
-                </CardContent>
-              </Card>
-            </div>
-            
-            <Card>
-              <CardHeader>
-                <CardTitle>Recent Activity</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-4">
-                  {[
-                    { action: "Excel file uploaded", user: "John Doe", time: "2 minutes ago", type: "upload" },
-                    { action: "Search query processed", user: "Jane Smith", time: "5 minutes ago", type: "search" },
-                    { action: "AI response generated", user: "Mike Johnson", time: "8 minutes ago", type: "ai" },
-                    { action: "Data exported", user: "Sarah Wilson", time: "15 minutes ago", type: "export" }
-                  ].map((activity, index) => (
-                    <div key={index} className="flex items-center space-x-4">
-                      <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
-                      <div className="flex-1">
-                        <p className="text-sm font-medium">{activity.action}</p>
-                        <p className="text-xs text-gray-500">by {activity.user} • {activity.time}</p>
+                    {searchResults.llmResponse && (
+                      <Card className="bg-green-50 border-green-200">
+                        <CardHeader>
+                          <CardTitle className="text-green-800">AI Answer</CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                          <p className="text-green-900">{searchResults.llmResponse.answer}</p>
+                          <div className="flex items-center gap-4 mt-3 text-sm text-green-700">
+                            <Badge variant="secondary">
+                              Confidence: {Math.round(searchResults.llmResponse.confidence * 100)}%
+                            </Badge>
+                            <Badge variant="secondary">
+                              Data Points: {searchResults.llmResponse.dataPoints}
+                            </Badge>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )}
+
+                    {/* LLM Generated Table */}
+                    {searchResults.generatedTable && (
+                      <Card className="bg-blue-50 border-blue-200">
+                        <CardHeader>
+                          <CardTitle className="text-blue-800">AI Generated Table</CardTitle>
+                          <CardDescription>
+                            Dynamic table structure created by AI based on the analysis
+                          </CardDescription>
+                        </CardHeader>
+                        <CardContent>
+                          <div 
+                            className="overflow-x-auto"
+                            dangerouslySetInnerHTML={{ __html: searchResults.generatedTable }}
+                          />
+                        </CardContent>
+                      </Card>
+                    )}
+
+                    {/* Structured Data Table */}
+                    {searchResults.structuredData && searchResults.structuredData.length > 0 && (
+                      <div className="mt-6">
+                        <h3 className="text-lg font-semibold mb-4 text-gray-800">
+                          Search Results ({searchResults.structuredData.length} items)
+                        </h3>
+                        
+                        {/* Search and Filter Controls */}
+                        <div className="mb-4 flex flex-wrap gap-4 items-center">
+                          <div className="flex-1 min-w-64">
+                            <input
+                              type="text"
+                              placeholder="Search in results..."
+                              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              value={tableSearchTerm}
+                              onChange={(e) => setTableSearchTerm(e.target.value)}
+                            />
+                          </div>
+                          <div className="flex gap-2">
+                                                         <select
+                               value={tableSortBy}
+                               onChange={(e) => setTableSortBy(e.target.value)}
+                               className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             >
+                               <option value="semanticString">Sort by Row</option>
+                               <option value="metric">Sort by Column</option>
+                               <option value="value">Sort by Value</option>
+                               <option value="sheetName">Sort by Sheet</option>
+                               <option value="score">Sort by Score</option>
+                             </select>
+                            <button
+                              onClick={() => setTableSortOrder(tableSortOrder === 'asc' ? 'desc' : 'asc')}
+                              className="px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            >
+                              {tableSortOrder === 'asc' ? '↑' : '↓'}
+                            </button>
+                          </div>
+                        </div>
+
+                                                 {/* Summary Statistics */}
+                         <div className="mb-4 grid grid-cols-2 md:grid-cols-4 gap-4">
+                           <div className="bg-blue-50 p-3 rounded-lg">
+                             <div className="text-sm text-blue-600 font-medium">Total Results</div>
+                             <div className="text-2xl font-bold text-blue-800">{filteredTableData.length}</div>
+                           </div>
+                           <div className="bg-green-50 p-3 rounded-lg">
+                             <div className="text-sm text-green-600 font-medium">Unique Sheets</div>
+                             <div className="text-2xl font-bold text-green-800">
+                               {Array.from(new Set(filteredTableData.map(item => item.sheetName || item.sheetId))).length}
+                             </div>
+                           </div>
+                           <div className="bg-purple-50 p-3 rounded-lg">
+                             <div className="text-sm text-purple-600 font-medium">Unique Columns</div>
+                             <div className="text-2xl font-bold text-purple-800">
+                               {Array.from(new Set(filteredTableData.map(item => item.metric))).length}
+                             </div>
+                           </div>
+                           <div className="bg-orange-50 p-3 rounded-lg">
+                             <div className="text-sm text-orange-600 font-medium">Data Types</div>
+                             <div className="text-2xl font-bold text-orange-800">
+                               {Array.from(new Set(filteredTableData.map(item => 
+                                 typeof item.value === 'number' ? 'Number' : 
+                                 (typeof item.value === 'string' && item.value.match(/^\d{1,2}\/\d{1,2}\/\d{2,4}$/)) ? 'Date' : 
+                                 'Text'
+                               ))).length}
+                             </div>
+                           </div>
+                         </div>
+
+                                                                {/* Row/Column Table Structure */}
+                    <div className="rounded-md border">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Row</TableHead>
+                            <TableHead>Column</TableHead>
+                            <TableHead>Value</TableHead>
+                            <TableHead>Sheet</TableHead>
+                            <TableHead>Score</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {filteredTableData.map((item, index) => {
+                            // Extract row and column from semantic string or dimensions
+                            const semanticParts = item.semanticString?.split(' | ') || [];
+                            const rowInfo = semanticParts[1] || 'N/A';
+                            const columnInfo = item.metric || 'N/A';
+                            
+                            // Handle date values properly - don't convert to numeric
+                            let displayValue = item.value;
+                            if (item.value !== null && item.value !== undefined) {
+                              // If it's a date (Excel date number), convert it back to readable format
+                              if (typeof item.value === 'number' && item.value > 1 && item.value < 100000) {
+                                // This is likely an Excel date number, convert to readable date
+                                const excelDate = new Date((item.value - 25569) * 86400 * 1000);
+                                displayValue = excelDate.toLocaleDateString();
+                              } else if (typeof item.value === 'string' && item.value.match(/^\d{1,2}\/\d{1,2}\/\d{2,4}$/)) {
+                                // Keep date strings as-is
+                                displayValue = item.value;
+                              } else {
+                                // For numeric values, format them
+                                displayValue = typeof item.value === 'number' ? 
+                                  new Intl.NumberFormat('en-IN').format(item.value) : 
+                                  String(item.value);
+                              }
+                            } else {
+                              displayValue = 'N/A';
+                            }
+
+                            return (
+                              <TableRow key={item._id || index}>
+                                <TableCell>
+                                  <div className="font-medium text-sm">
+                                    {rowInfo}
+                                  </div>
+                                </TableCell>
+                                
+                                <TableCell>
+                                  <div className="font-medium text-sm">
+                                    {columnInfo}
+                                  </div>
+                                </TableCell>
+                                
+                                <TableCell>
+                                  <div className={`text-lg font-bold ${
+                                    typeof item.value === 'number' ? 'text-green-600' : 
+                                    (typeof item.value === 'string' && item.value.match(/^\d{1,2}\/\d{1,2}\/\d{2,4}$/)) ? 'text-blue-600' :
+                                    'text-gray-600'
+                                  }`}>
+                                    {displayValue}
+                                  </div>
+                                  {/* Show time context if available */}
+                                  {(item.year || item.month || item.quarter) && (
+                                    <div className="text-xs text-gray-500 mt-1">
+                                      {item.year && <span className="mr-2">📅 {item.year}</span>}
+                                      {item.month && <span className="mr-2">📆 {item.month}</span>}
+                                      {item.quarter && <span>🗓️ {item.quarter}</span>}
+                                    </div>
+                                  )}
+                                </TableCell>
+                                
+                                <TableCell>
+                                  <div className="text-sm">
+                                    📄 {item.sheetName || item.sheetId?.slice(-8) || 'N/A'}
+                                    </div>
+                                </TableCell>
+                                
+                                <TableCell>
+                                  <div className="text-sm font-mono">
+                                    {item.score?.toFixed(3) || 'N/A'}
+                                </div>
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                              </div>
+
+                        {/* Pagination Info */}
+                        <div className="mt-4 text-sm text-gray-500 text-center">
+                          Showing {filteredTableData.length} of {searchResults.structuredData.length} results
+                              </div>
+                          </div>
+                    )}
+
+                    {searchResults.error && (
+                      <div className="flex items-center gap-2 text-red-600">
+                        <AlertCircle className="h-4 w-4" />
+                        <span>Search error: {searchResults.error}</span>
                       </div>
-                    </div>
-                  ))}
-                </div>
+                    )}
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>

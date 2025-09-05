@@ -1,170 +1,264 @@
-import { Models } from '@google/genai';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { config } from 'dotenv';
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { config } from "dotenv";
 
-config({ path: '.env.local' });
-
-let modelLoaded = false;
-let model: any;
-
-async function embeddingProvider() {
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || 'AIzaSyBcAwm2APnl4vWQw6ro8LiXtPbnCJsUmkI');
-  model = genAI.getGenerativeModel({ model: 'embedding-001' });
-  if (model) modelLoaded = true;
-  return model;
+config();
+export interface EmbeddingRequest {
+  cellId: string;
+  semanticString: string;
 }
 
-// Retry function with exponential backoff and better error handling
-async function retryWithBackoff<T>(
-  fn: () => Promise<T>,
-  maxRetries: number = 3,
-  baseDelay: number = 1000
-): Promise<T> {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+export interface EmbeddingResult {
+  cellId: string;
+  embedding: number[];
+  index: number;
+}
+
+export class EmbeddingService {
+  private model: any;
+  private modelLoaded: boolean = false;
+  private readonly batchSize: number = 20;
+  private readonly retryAttempts: number = 5;
+  private readonly retryDelay: number = 2000;
+  private readonly itemDelay: number = 500;
+  private readonly batchDelay: number = 1500;
+
+  /**
+   * Initialize the embedding model
+   */
+  private async initializeModel(): Promise<void> {
+    if (this.modelLoaded) return;
+
     try {
-      return await fn();
+      const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || 'AIzaSyBcAwm2APnl4vWQw6ro8LiXtPbnCJsUmkI');
+      this.model = genAI.getGenerativeModel({ model: "embedding-001" });
+      this.modelLoaded = true;
+      console.log("✅ Embedding model initialized successfully");
+    } catch (error) {
+      console.error("❌ Failed to initialize embedding model:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Retry mechanism with exponential backoff
+   */
+  private async retryWithBackoff<T>(
+    operation: () => Promise<T>,
+    maxRetries: number = this.retryAttempts,
+    baseDelay: number = this.retryDelay
+  ): Promise<T> {
+    let lastError: Error;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        
+        if (attempt === maxRetries) {
+          throw lastError;
+        }
+        
+        const delay = baseDelay * Math.pow(2, attempt - 1);
+        console.log(`   ⏳ Retry attempt ${attempt}/${maxRetries} in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+    
+    throw lastError!;
+  }
+
+  /**
+   * Process a single embedding request
+   */
+  private async processSingleEmbedding(
+    request: EmbeddingRequest,
+    globalIndex: number
+  ): Promise<EmbeddingResult> {
+    try {
+      // Validate string before sending to API
+      if (!request.semanticString || request.semanticString.trim().length === 0) {
+        console.warn(`⚠️  Skipping empty string for cellId: ${request.cellId}`);
+        return {
+          cellId: request.cellId,
+          embedding: new Array(768).fill(0),
+          index: globalIndex
+        };
+      }
+
+      console.log(`   🔄 Embedding: "${request.semanticString}" (cellId: ${request.cellId}, index: ${globalIndex + 1})`);
+      
+      const result = await this.retryWithBackoff(async () => {
+        return await this.model.embedContent(request.semanticString);
+      });
+      
+      console.log(`   ✅ Successfully embedded: "${request.semanticString}" for cellId: ${request.cellId}`);
+      
+      return {
+        cellId: request.cellId,
+        embedding: result.embedding.values,
+        index: globalIndex
+      };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.log(`⚠️  Embedding attempt ${attempt + 1} failed:`, errorMessage);
+      console.error(`❌ Failed to embed text for cellId: ${request.cellId}: "${request.semanticString}"`);
+      console.error(`   Error:`, errorMessage);
       
-      if (attempt === maxRetries) {
-        console.error(`❌ Max retries (${maxRetries}) exceeded for embedding`);
-        throw error;
-      }
-      
-      const delay = baseDelay * Math.pow(2, attempt);
-      console.log(`⏳ Retrying in ${delay}ms... (attempt ${attempt + 1}/${maxRetries})`);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      // Return a zero vector as fallback
+      return {
+        cellId: request.cellId,
+        embedding: new Array(768).fill(0),
+        index: globalIndex
+      };
     }
   }
-  throw new Error('Max retries exceeded');
-}
 
-async function makeEmbeddings(semanticStrings: string[]): Promise<number[][]> {
-  if (!modelLoaded) {
-    await embeddingProvider();
-  }
-  
-  console.log(`🔄 Generating embeddings for ${semanticStrings.length} strings...`);
-  
-  // Process in smaller batches to avoid rate limits
-  const batchSize = 15; // Reduced batch size
-  const embeddings: number[][] = [];
-  
-  for (let i = 0; i < semanticStrings.length; i += batchSize) {
-    const batch = semanticStrings.slice(i, i + batchSize);
-    const batchIndex = Math.floor(i / batchSize) + 1;
-    const totalBatches = Math.ceil(semanticStrings.length / batchSize);
-    
+  /**
+   * Process a batch of embedding requests
+   */
+  private async processBatch(
+    batch: EmbeddingRequest[],
+    batchIndex: number,
+    totalBatches: number,
+    startIndex: number
+  ): Promise<EmbeddingResult[]> {
     console.log(`   → Processing batch ${batchIndex}/${totalBatches} (${batch.length} items)`);
     
-    // Process batch with retry logic
-    const batchPromises = batch.map(async (string, index) => {
-      return retryWithBackoff(async () => {
-        try {
-          // Validate string before sending to API
-          if (!string || string.trim().length === 0) {
-            console.warn(`⚠️  Skipping empty string at index ${i + index}`);
-            return new Array(768).fill(0);
-          }
-          
-          const result = await model.embedContent(string);
-          return result.embedding.values;
-        } catch (error) {
-          console.error(`❌ Failed to embed text at index ${i + index}:`, error);
-          // Return a zero vector as fallback
-          return new Array(768).fill(0);
-        }
-      }, 3, 2000); // 3 retries, 2 second base delay
-    });
+    const batchResults: EmbeddingResult[] = [];
     
-    const batchResults = await Promise.all(batchPromises);
-    embeddings.push(...batchResults);
-    
-    // Add delay between batches to avoid rate limiting
-    if (i + batchSize < semanticStrings.length) {
-      console.log(`   ⏳ Waiting 1 second before next batch...`);
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-  }
-  
-  console.log(`✅ Generated ${embeddings.length} embeddings successfully`);
-  return embeddings;
-}
-
-// Optimized version for large batches with better error handling
-async function makeEmbeddingsOptimized(semanticStrings: string[]): Promise<number[][]> {
-  if (!modelLoaded) {
-    await embeddingProvider();
-  }
-  
-  console.log(`🚀 Optimized embedding generation for ${semanticStrings.length} strings...`);
-  
-  // Log all strings being processed for debugging
-  console.log(`📋 All strings to be embedded:`);
-  semanticStrings.forEach((str, idx) => {
-    console.log(`   ${idx + 1}: "${str}"`);
-  });
-  
-  // Use smaller batches for better reliability
-  const batchSize = 20; // Reduced from 10 to avoid overwhelming API
-  const embeddings: number[][] = [];
-  
-  // Process batches sequentially to avoid overwhelming the API
-  for (let i = 0; i < semanticStrings.length; i += batchSize) {
-    const batch = semanticStrings.slice(i, i + batchSize);
-    const batchIndex = Math.floor(i / batchSize) + 1;
-    const totalBatches = Math.ceil(semanticStrings.length / batchSize);
-    
-    console.log(`   → Processing batch ${batchIndex}/${totalBatches} (${batch.length} items)`);
-    
-    // Process batch items sequentially instead of parallel to reduce API load
-    const batchResults: number[][] = [];
+    // Process batch items sequentially to avoid overwhelming the API
     for (let j = 0; j < batch.length; j++) {
-      const string = batch[j];
-      const globalIndex = i + j;
+      const request = batch[j];
+      const globalIndex = startIndex + j;
       
-      try {
-        const embedding = await retryWithBackoff(async () => {
-          // Validate string before sending to API
-          if (!string || string.trim().length === 0) {
-            console.warn(`⚠️  Skipping empty string at global index ${globalIndex}`);
-            return new Array(768).fill(0);
-          }
-          
-          console.log(`   🔄 Embedding: "${string}" (index ${globalIndex + 1})`);
-          const result = await model.embedContent(string);
-          console.log(`   ✅ Successfully embedded: "${string}"`);
-          return result.embedding.values;
-        }, 5, 2000); // Increased to 5 retries, 2 second base delay
-        
-        batchResults.push(embedding);
-             } catch (error) {
-         const errorMessage = error instanceof Error ? error.message : String(error);
-         console.error(`❌ Failed to embed text in batch ${batchIndex}, item ${j + 1}: "${string}"`);
-         console.error(`   Error:`, errorMessage);
-         // Return a zero vector as fallback
-         batchResults.push(new Array(768).fill(0));
-       }
+      const result = await this.processSingleEmbedding(request, globalIndex);
+      batchResults.push(result);
       
       // Add small delay between individual items to avoid rate limiting
       if (j < batch.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await new Promise(resolve => setTimeout(resolve, this.itemDelay));
       }
     }
     
-    embeddings.push(...batchResults);
     console.log(`   ✅ Completed batch ${batchIndex}/${totalBatches}`);
-    
-    // Add longer delay between batches
-    if (i + batchSize < semanticStrings.length) {
-        console.log(`   ⏳ Waiting 3 seconds before next batch...`);
-      await new Promise(resolve => setTimeout(resolve, 1500));
-    }
+    return batchResults;
   }
-  
-  console.log(`✅ Optimized embedding generation complete: ${embeddings.length} embeddings`);
-  return embeddings;
+
+  /**
+   * Create batches from the input array
+   */
+  private createBatches(requests: EmbeddingRequest[]): EmbeddingRequest[][] {
+    const batches: EmbeddingRequest[][] = [];
+    
+    for (let i = 0; i < requests.length; i += this.batchSize) {
+      batches.push(requests.slice(i, i + this.batchSize));
+    }
+    
+    return batches;
+  }
+
+  /**
+   * Main method to generate embeddings with batching and async processing
+   */
+  async makeEmbeddingsOptimized(requests: EmbeddingRequest[]): Promise<{cellId: string, embedding: number[]}[]> {
+    // Initialize model if not already loaded
+    await this.initializeModel();
+    
+    console.log(`🚀 Optimized embedding generation for ${requests.length} strings...`);
+    
+    // Log all strings being processed for debugging
+    console.log(`📋 All strings to be embedded:`);
+    requests.forEach((req, idx) => {
+      console.log(`   ${idx + 1}: "${req.semanticString}" (cellId: ${req.cellId})`);
+    });
+    
+    // Create batches
+    const batches = this.createBatches(requests);
+    const totalBatches = batches.length;
+    const embeddings:{cellId: string, embedding: number[]}[] = [];
+    
+    // Process batches sequentially to avoid overwhelming the API
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      const batchIndex = i + 1;
+      const startIndex = i * this.batchSize;
+      
+      // Process the batch
+      const batchResults = await this.processBatch(batch, batchIndex, totalBatches, startIndex);
+      
+      // Map results back to their original positions using cellId
+      for (const result of batchResults) {
+        const originalIndex = requests.findIndex(req => req.cellId === result.cellId);
+        if (originalIndex !== -1) {
+          embeddings.push(result);
+        }
+      }
+      
+      // Add longer delay between batches
+      if (i < batches.length - 1) {
+        console.log(`   ⏳ Waiting ${this.batchDelay}ms before next batch...`);
+        await new Promise(resolve => setTimeout(resolve, this.batchDelay));
+      }
+    }
+    
+    console.log(`✅ Optimized embedding generation complete: ${embeddings.length} embeddings`);
+    return embeddings;
+  }
+
+  /**
+   * Alternative method using Promise.all for parallel processing within batches
+   */
+  async makeEmbeddingsParallel(requests: EmbeddingRequest[]): Promise<{cellId: string, embedding: number[]}[]> {
+    // Initialize model if not already loaded
+    await this.initializeModel();
+    
+    console.log(`🚀 Parallel embedding generation for ${requests.length} strings...`);
+    
+    // Create batches
+    const batches = this.createBatches(requests);
+    const totalBatches = batches.length;
+    const embeddings: {cellId: string, embedding: number[]}[] = [];
+    
+    // Process batches sequentially, but items within each batch in parallel
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      const batchIndex = i + 1;
+      const startIndex = i * this.batchSize;
+      
+      console.log(`   → Processing batch ${batchIndex}/${totalBatches} (${batch.length} items) in parallel`);
+      
+      // Process batch items in parallel using Promise.all
+      const batchPromises = batch.map((request, j) => {
+        const globalIndex = startIndex + j;
+        return this.processSingleEmbedding(request, globalIndex);
+      });
+      
+      const batchResults = await Promise.all(batchPromises);
+      
+      // Map results back to their original positions using cellId
+      for (const result of batchResults) {
+        const originalIndex = requests.findIndex(req => req.cellId === result.cellId);
+        if (originalIndex !== -1) {
+          embeddings.push(result);
+        }
+      }
+      
+      console.log(`   ✅ Completed batch ${batchIndex}/${totalBatches}`);
+      
+      // Add delay between batches
+      if (i < batches.length - 1) {
+        console.log(`   ⏳ Waiting ${this.batchDelay}ms before next batch...`);
+        await new Promise(resolve => setTimeout(resolve, this.batchDelay));
+      }
+    }
+    
+    console.log(`✅ Parallel embedding generation complete: ${embeddings.length} embeddings`);
+    return embeddings;
+  }
 }
 
-export { embeddingProvider, makeEmbeddings, makeEmbeddingsOptimized };
+// Export singleton instance for backward compatibility
+export const embeddingService = new EmbeddingService();
+
+// Legacy function export for backward compatibility
+export const makeEmbeddingsOptimized = embeddingService.makeEmbeddingsOptimized.bind(embeddingService);

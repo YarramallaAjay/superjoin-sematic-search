@@ -3,10 +3,10 @@ import { writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { existsSync } from 'fs';
 import { config } from 'dotenv';
-import { parseAnd_upload_cells } from '../../../../../embedder/parse';
+import { parseAnd_upload_cells, EnhancedParsedCell } from '../../../../../embedder/parse';
 import { storeCellsEnhanced, updateEmbeddingsEnhanced } from '../../../../../embedder/store';
-import { TenantModel, WorkbookModel, SheetModel } from '../../../../../models/workbook';
 import mongoose from 'mongoose';
+import { EmbeddingResult, embeddingService } from '../../../../../embedder/embedding';
 
 // Load environment variables
 config({ path: '.env.local' });
@@ -84,16 +84,22 @@ export async function POST(request: NextRequest) {
 
       // Create tenant and workbook records
       try {
-        await TenantModel.create({
-          _id: tenantId,
+        if (!mongoose.connection.db) {
+          throw new Error('Database connection not established');
+        }
+
+        await mongoose.connection.db.collection('tenants').insertOne({
+          _id: new mongoose.Types.ObjectId(), // Generate proper MongoDB ObjectId
+          tenantId: tenantId, // Store the string ID in a separate field
           name: `Tenant_${tenantId.slice(-6)}`,
           createdAt: new Date(),
           updatedAt: new Date(),
           workbooks: [workbookId]
         });
 
-        await WorkbookModel.create({
-          _id: workbookId,
+        await mongoose.connection.db.collection('workbooks').insertOne({
+          _id: new mongoose.Types.ObjectId(), // Generate proper MongoDB ObjectId
+          workbookId: workbookId, // Store the string ID in a separate field
           tenantId: tenantId,
           name: file.name.replace(/\.[^/.]+$/, ""), // Remove file extension
           contentHash: Buffer.from(file.name + timestamp).toString('base64'),
@@ -121,7 +127,7 @@ export async function POST(request: NextRequest) {
         tenantId,
         workbookId,
         buffer,
-        async (cell: any, cellId: string) => {
+        async (cell: EnhancedParsedCell, cellId: string) => {
           // Callback for each parsed cell (can be used for progress tracking)
           console.log(`📊 Parsed cell ${cellId}: ${cell.metric} = ${cell.value}`);
         },
@@ -131,8 +137,12 @@ export async function POST(request: NextRequest) {
           
           // Create sheet record
           try {
-            await SheetModel.create({
-              _id: `sh_${sheetName.toLowerCase().replace(/\s+/g, "_")}`,
+            if (!mongoose.connection.db) {
+              throw new Error('Database connection not established');
+            }
+
+            await mongoose.connection.db.collection('sheets').insertOne({
+              _id: Object(`sh_${sheetName.toLowerCase().replace(/\s+/g, "_")}`),
               workbookId: workbookId,
               name: sheetName,
               rowCount: rowCount,
@@ -162,14 +172,23 @@ export async function POST(request: NextRequest) {
         throw new Error(`Database storage failed: ${storageResult.errorCount} cells could not be stored`);
       }
 
-      // Update embeddings (in case they weren't stored initially)
-      console.log(`🔄 Updating embeddings for ${parsedCells.length} cells...`);
-      const embeddingResult = await updateEmbeddingsEnhanced(parsedCells);
+      // const allEmbeddings=await embeddingService.makeEmbeddingsOptimized(parsedCells.map(cell=>({cellId: cell._id, semanticString: cell.semanticString})));
+      // if( allEmbeddings.length!==parsedCells.length){
+      //   console.log("All embeddings are not generated")
+      //   throw new Error("All embeddings are not generated");
+      // }
+      // allEmbeddings.map(embedding=>{
+      //   parsedCells.find(cell=>cell._id===embedding.cellId)!.embedding=embedding.embedding;
+      // });
+
+      // // Update embeddings (in case they weren't stored initially)
+      // console.log(`🔄 Updating embeddings for ${parsedCells.length} cells...`);
+      // const embeddingResult = await updateEmbeddingsEnhanced(parsedCells);
       
-      if (!embeddingResult.success) {
-        console.error(`❌ Embedding updates failed: ${embeddingResult.errorCount} errors`);
-        throw new Error(`Embedding updates failed: ${embeddingResult.errorCount} cells could not be updated`);
-      }
+      // if (!embeddingResult.success) {
+      //   console.error(`❌ Embedding updates failed: ${embeddingResult.errorCount} errors`);
+      //   throw new Error(`Embedding updates failed: ${embeddingResult.errorCount} cells could not be updated`);
+      // }
 
       const processingResult = {
         success: true,
@@ -183,7 +202,7 @@ export async function POST(request: NextRequest) {
         workbookId: workbookId,
         cellCount: parsedCells.length,
         storageResult: storageResult,
-        embeddingResult: embeddingResult
+        embeddingResult: storageResult
       };
 
       console.log(`🎉 Processing complete for ${file.name}:`, processingResult);

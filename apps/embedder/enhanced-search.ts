@@ -1,6 +1,5 @@
 import { MongoClient, Db, Collection } from "mongodb";
-import { embeddingProvider } from "./embedding";
-import { enhancedSemanticNormalizer } from "../utils/enhanced-semantic-normalizer";
+import { embeddingService } from "./embedding";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { llmConfig } from "../config/llm-config";
 
@@ -15,21 +14,30 @@ interface SearchResult {
   tenantId: string;
   workbookId: string;
   sheetId: string;
-  semanticString: string;
+  sheetName: string;
+  rowName: string;
+  colName: string;
+  rowIndex: number;
+  colIndex: number;
+  cellAddress: string;
+  dataType: string;
+  unit: string;
+  features: {
+    isPercentage: boolean;
+    isMargin: boolean;
+    isGrowth: boolean;
+    isAggregation: boolean;
+    isForecast: boolean;
+    isUniqueIdentifier: boolean;
+  };
+  sourceCell: string,
+  sourceFormula: string,
   metric: string;
-  normalizedMetric: string;
   value: any;
   year?: number;
-  quarter?: string;
   month?: string;
-  region?: string;
-  product?: string;
-  customerId?: string;
-  customerName?: string;
-  department?: string;
-  status?: string;
-  priority?: string;
-  score: number;
+  quarter?: string;
+  dimensions: Record<string, any>;
 }
 
 interface LLMResponse {
@@ -38,14 +46,14 @@ interface LLMResponse {
   reasoning: string;
   dataPoints: number;
   sources: string[];
+  generatedTable: string;
 }
 
 interface EnhancedQuery {
   originalQuery: string;
   normalizedQuery: string;
-  metrics: string[];
   dimensions: string[];
-  timeFilters: { year?: number; quarter?: string; month?: string };
+  timeFilters: { year?: number; month?: string; quarter?: string; period?: string };
   businessContext: string;
 }
 
@@ -61,33 +69,10 @@ export class EnhancedSearch {
     this.initializeLLM();
   }
 
-  private async initializeLLM() {
-    try {
-      // Initialize Gemini LLM using configuration
-      const geminiConfig = llmConfig.gemini;
-      const genAI = new GoogleGenerativeAI(geminiConfig.apiKey);
-      const model = genAI.getGenerativeModel({ 
-        model: geminiConfig.model,
-        generationConfig: {
-          temperature: geminiConfig.temperature,
-          maxOutputTokens: geminiConfig.maxTokens
-        }
-      });
-      
-      if (model) {
-        console.log("✅ Gemini LLM model initialized successfully");
-        console.log(`📊 Model: ${geminiConfig.model}, Temperature: ${geminiConfig.temperature}`);
-        this.llmModel = model;
-      } else {
-        throw new Error("Failed to get Gemini model instance");
-      }
-    } catch (error) {
-      console.error("❌ Failed to initialize Gemini LLM model:", error);
-      this.llmModel = null;
-    }
-  }
-
-  async connect() {
+  /**
+   * Connect to the database
+   */
+  async connect(): Promise<void> {
     const client = await this.client.connect();
     const db = client.db(llmConfig.mongo.database);
     
@@ -138,51 +123,251 @@ export class EnhancedSearch {
   }
 
   /**
-   * Strict semantic dictionary-based query normalization
-   * No AI - only uses semantic dictionary for exact matching
+   * Initialize the Gemini LLM model
+   */
+  private async initializeLLM(): Promise<void> {
+    try {
+      const geminiConfig = llmConfig.gemini;
+      const genAI = new GoogleGenerativeAI(geminiConfig.apiKey);
+      const model = genAI.getGenerativeModel({ 
+        model: geminiConfig.model,
+        generationConfig: {
+          temperature: geminiConfig.temperature,
+          maxOutputTokens: geminiConfig.maxTokens
+        }
+      });
+      
+      if (model) {
+        console.log("✅ Gemini LLM model initialized successfully");
+        console.log(`📊 Model: ${geminiConfig.model}, Temperature: ${geminiConfig.temperature}`);
+        this.llmModel = model;
+      } else {
+        throw new Error("Failed to get Gemini model instance");
+      }
+    } catch (error) {
+      console.error("❌ Failed to initialize Gemini LLM model:", error);
+      this.llmModel = null;
+    }
+  }
+
+  /**
+   * No query normalization - use original query as-is
    */
   private async enhanceQueryNormalization(query: string): Promise<EnhancedQuery> {
-    console.log("🔍 Strict semantic dictionary normalization");
+    console.log("🔍 No query normalization - using original query");
     
-    // Use only semantic dictionary normalization - no AI
-    const queryAnalysis = enhancedSemanticNormalizer.analyzeQuery(query);
-    const { metrics, dimensions, timeFilters } = queryAnalysis;
-    
-    // Build normalized query using semantic dictionary only
-    const normalizedQuery = enhancedSemanticNormalizer.createNormalizedQueryString({
-      ...queryAnalysis,
-      metrics,
-      dimensions
-    });
+    const normalizedQuery = query;
+    const dimensions = this.extractDimensions(query);
+    const timeFilters = this.extractTimeFilters(query);
 
-    console.log("✅ Semantic dictionary normalization completed");
-    console.log(`📝 Original: "${query}"`);
-    console.log(`📝 Normalized: "${normalizedQuery}"`);
-    console.log(`📊 Metrics: ${metrics.join(', ')}`);
+    console.log("✅ Query processing completed (no normalization)");
+    console.log(`📝 Original query: "${query}"`);
+    console.log(`📝 Query used for search: "${normalizedQuery}"`);
     console.log(`📊 Dimensions: ${dimensions.join(', ')}`);
-    console.log(`📅 Time Filters: ${JSON.stringify(timeFilters)}`);
+    console.log(`📅 Time Filters: ${JSON.stringify(timeFilters, null, 2)}`);
+    if (timeFilters.year) console.log(`📅 Year: ${timeFilters.year}`);
+    if (timeFilters.month) console.log(`📅 Month: ${timeFilters.month}`);
+    if (timeFilters.quarter) console.log(`📅 Quarter: ${timeFilters.quarter}`);
+    if (timeFilters.period) console.log(`📅 Period: ${timeFilters.period}`);
 
     return {
       originalQuery: query,
       normalizedQuery,
-      metrics,
       dimensions,
       timeFilters,
-      businessContext: "Semantic dictionary normalization"
+      businessContext: "No query normalization - original query preserved"
     };
   }
 
+  /**
+   * Extract metrics from query (simple pattern matching)
+   */
+  private extractMetrics(query: string): string[] {
+    const lowerQuery = query.toLowerCase();
+    const metrics: string[] = [];
+    
+    if (lowerQuery.includes('revenue') || lowerQuery.includes('sales')) metrics.push('revenue');
+    if (lowerQuery.includes('profit') || lowerQuery.includes('margin')) metrics.push('profit');
+    if (lowerQuery.includes('cost') || lowerQuery.includes('expense')) metrics.push('cost');
+    if (lowerQuery.includes('growth') || lowerQuery.includes('yoy')) metrics.push('growth');
+    
+    return metrics;
+  }
 
+  /**
+   * Extract dimensions from query (simple pattern matching)
+   */
+  private extractDimensions(query: string): string[] {
+    const lowerQuery = query.toLowerCase();
+    const dimensions: string[] = [];
+    
+    if (lowerQuery.includes('region') || lowerQuery.includes('location')) dimensions.push('region');
+    if (lowerQuery.includes('product') || lowerQuery.includes('item')) dimensions.push('product');
+    if (lowerQuery.includes('customer') || lowerQuery.includes('client')) dimensions.push('customer');
+    if (lowerQuery.includes('department') || lowerQuery.includes('division')) dimensions.push('department');
+    
+    return dimensions;
+  }
+
+  /**
+   * Extract time filters from query with comprehensive date pattern matching
+   */
+  private extractTimeFilters(query: string): { year?: number; month?: string; quarter?: string; period?: string } {
+    const lowerQuery = query.toLowerCase();
+    const timeFilters: { year?: number; month?: string; quarter?: string; period?: string } = {};
+    
+    // Extract year patterns
+    const yearPatterns = [
+      /\b(20\d{2})\b/,
+      /\b(19\d{2})\b/,
+      /\b(2\d{3})\b/,
+      /\b(1\d{3})\b/,
+      /\b(\d{2})['s]?\b/
+    ];
+    
+    for (const pattern of yearPatterns) {
+      const match = lowerQuery.match(pattern);
+      if (match) {
+        let year = parseInt(match[1]);
+        if (year < 100) {
+          year = year >= 50 ? 1900 + year : 2000 + year;
+        }
+        timeFilters.year = year;
+        break;
+      }
+    }
+    
+    // Extract month patterns
+    const monthPatterns = [
+      /\b(january|jan)\b/i,
+      /\b(february|feb)\b/i,
+      /\b(march|mar)\b/i,
+      /\b(april|apr)\b/i,
+      /\b(may)\b/i,
+      /\b(june|jun)\b/i,
+      /\b(july|jul)\b/i,
+      /\b(august|aug)\b/i,
+      /\b(september|sept?)\b/i,
+      /\b(october|oct)\b/i,
+      /\b(november|nov)\b/i,
+      /\b(december|dec)\b/i
+    ];
+    
+    const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 
+                        'july', 'august', 'september', 'october', 'november', 'december'];
+    
+    for (let i = 0; i < monthPatterns.length; i++) {
+      const match = lowerQuery.match(monthPatterns[i]);
+      if (match) {
+        timeFilters.month = monthNames[i];
+        break;
+      }
+    }
+    
+    // Extract quarter patterns
+    const quarterPatterns = [
+      /\b(q[1-4])\b/i,
+      /\b(quarter\s*[1-4])\b/i,
+      /\b(first|second|third|fourth)\s*quarter\b/i,
+      /\b(1st|2nd|3rd|4th)\s*quarter\b/i
+    ];
+    
+    for (const pattern of quarterPatterns) {
+      const match = lowerQuery.match(pattern);
+      if (match) {
+        if (match[1].toLowerCase().startsWith('q')) {
+          timeFilters.quarter = match[1].toUpperCase();
+        } else if (match[1].toLowerCase().includes('1') || match[1].toLowerCase().includes('first')) {
+          timeFilters.quarter = 'Q1';
+        } else if (match[1].toLowerCase().includes('2') || match[1].toLowerCase().includes('second')) {
+          timeFilters.quarter = 'Q2';
+        } else if (match[1].toLowerCase().includes('3') || match[1].toLowerCase().includes('third')) {
+          timeFilters.quarter = 'Q3';
+        } else if (match[1].toLowerCase().includes('4') || match[1].toLowerCase().includes('fourth')) {
+          timeFilters.quarter = 'Q4';
+        }
+        break;
+      }
+    }
+    
+    // Extract time period patterns
+    const periodPatterns = [
+      /\b(this\s*(year|month|quarter|week))\b/i,
+      /\b(last\s*(year|month|quarter|week))\b/i,
+      /\b(previous\s*(year|month|quarter|week))\b/i,
+      /\b(current\s*(year|month|quarter|week))\b/i,
+      /\b(ytd|year\s*to\s*date)\b/i,
+      /\b(mtd|month\s*to\s*date)\b/i,
+      /\b(qtd|quarter\s*to\s*date)\b/i,
+      /\b(annual|yearly)\b/i,
+      /\b(monthly)\b/i,
+      /\b(quarterly)\b/i,
+      /\b(weekly)\b/i,
+      /\b(daily)\b/i
+    ];
+    
+    for (const pattern of periodPatterns) {
+      const match = lowerQuery.match(pattern);
+      if (match) {
+        timeFilters.period = match[1].toLowerCase();
+        break;
+      }
+    }
+    
+    // Extract fiscal year patterns
+    const fiscalPatterns = [
+      /\b(fy\s*(\d{2,4}))\b/i,
+      /\b(fiscal\s*(year|yr)\s*(\d{2,4}))\b/i,
+      /\b(fy\s*(\d{2})\s*-\s*(\d{2}))\b/i
+    ];
+    
+    for (const pattern of fiscalPatterns) {
+      const match = lowerQuery.match(pattern);
+      if (match) {
+        if (match[2] && match[3]) {
+          let startYear = parseInt(match[2]);
+          if (startYear < 100) startYear = 2000 + startYear;
+          timeFilters.year = startYear;
+          timeFilters.period = 'fiscal_year';
+        } else if (match[2]) {
+          let year = parseInt(match[2]);
+          if (year < 100) year = 2000 + year;
+          timeFilters.year = year;
+          timeFilters.period = 'fiscal_year';
+        }
+        break;
+      }
+    }
+    
+    // Extract relative time patterns
+    const relativePatterns = [
+      /\b(past\s*(\d+)\s*(year|month|quarter|week)s?)\b/i,
+      /\b(last\s*(\d+)\s*(year|month|quarter|week)s?)\b/i,
+      /\b(previous\s*(\d+)\s*(year|month|quarter|week)s?)\b/i,
+      /\b(recent\s*(\d+)\s*(year|month|quarter|week)s?)\b/i
+    ];
+    
+    for (const pattern of relativePatterns) {
+      const match = lowerQuery.match(pattern);
+      if (match) {
+        const count = parseInt(match[2]);
+        const unit = match[3].toLowerCase();
+        timeFilters.period = `last_${count}_${unit}s`;
+        break;
+      }
+    }
+    
+    return timeFilters;
+  }
 
   /**
    * Stage 1: Vector Search with proper filtering
-   * Performs semantic search using normalized query embeddings with workbookId/tenantId filters
    */
   private async performVectorSearch(
     normalizedQuery: string,
     workbookId: string,
     tenantId: string,
-    topK: number = 50
+    topK: number = 1000
   ): Promise<SearchResult[]> {
     if (!this.dbConfig) {
       throw new Error("Database not connected. Call connect() first.");
@@ -192,66 +377,59 @@ export class EnhancedSearch {
     console.log(`📝 Normalized query: "${normalizedQuery}"`);
     console.log(`📚 Workbook: ${workbookId}, Tenant: ${tenantId}`);
 
-    // Generate embedding for the normalized query
-    const model = await embeddingProvider();
-    const queryEmbedding = await model.embedContent(normalizedQuery);
-    const embedding = queryEmbedding.embedding.values;
+    const queryEmbeddingRequest = [{
+      cellId: 'query',
+      semanticString: normalizedQuery
+    }];
+    const queryEmbeddings = await embeddingService.makeEmbeddingsOptimized(queryEmbeddingRequest);
+    const embedding = queryEmbeddings[0]?.embedding || new Array(768).fill(0);
 
-    // Strategy 1: Pure vector search without any pre-filtering (MongoDB Atlas requirement)
-    // This ensures $vectorSearch is absolutely the first and only stage initially
     const pureVectorPipeline = [
       {
         $vectorSearch: {
           index: "vector_index",
           path: "embedding",
           queryVector: embedding,
-          numCandidates: 1000, // Get more candidates to filter from
-          limit: topK * 5 // Get more results to filter from
+          numCandidates: 1000,
+          limit: topK * 5
         }
       }
     ];
 
-    console.log("📑 Pure Vector Search Pipeline:", JSON.stringify(pureVectorPipeline, null, 2));
+    console.log("Pure Vector Search Pipeline:", JSON.stringify(pureVectorPipeline, null, 2));
 
     let rawResults: any[] = [];
     
     try {
-      // Try pure vector search first (no filtering)
       console.log("🔍 Attempting pure vector search...");
       rawResults = await this.dbConfig.collection
         .aggregate(pureVectorPipeline)
         .toArray();
       console.log(`✅ Pure vector search successful: ${rawResults.length} results`);
       
-      // Now filter the results in memory for workbookId and tenantId
-      const filteredResults = rawResults.filter(doc => 
-        doc.workbookId === workbookId && doc.tenantId === tenantId
-      );
-      
-      console.log(`🔍 Filtered results: ${filteredResults.length} match workbookId/tenantId criteria`);
-      
-      // Apply additional processing to filtered results
-      const processedResults = filteredResults.slice(0, topK).map((doc: any) => ({
+      const processedResults = rawResults.map((doc: any) => ({
         _id: doc._id,
         tenantId: doc.tenantId,
         workbookId: doc.workbookId,
         sheetId: doc.sheetId,
-        semanticString: doc.semanticString,
+        sheetName: doc.sheetName || 'Unknown',
+        rowName: doc.rowName,
+        colName: doc.colName,
+        rowIndex: doc.rowIndex,
+        colIndex: doc.colIndex,
+        cellAddress: doc.cellAddress,
+        dataType: doc.dataType,
+        unit: doc.unit,
+        features: doc.features,
+        sourceCell: doc.sourceCell,
+        sourceFormula: doc.sourceFormula,
         metric: doc.metric,
-        normalizedMetric: doc.normalizedMetric || doc.metric,
         value: doc.value,
         year: doc.year,
-        quarter: doc.quarter,
         month: doc.month,
-        region: doc.region,
-        product: doc.product,
-        customerId: doc.customerId,
-        customerName: doc.customerName,
-        department: doc.department,
-        status: doc.status,
-        priority: doc.priority,
-        score: doc.score || 0
-      }));
+        quarter: doc.quarter,
+        dimensions: doc.dimensions || {}
+      })).filter((doc: any) => doc.workbookId === workbookId && doc.tenantId === tenantId);
       
       rawResults = processedResults;
       
@@ -259,113 +437,48 @@ export class EnhancedSearch {
       console.log("⚠️  Pure vector search failed, trying alternative approach...");
       console.log("❌ Vector search error:", vectorError.message || vectorError);
       
-      // Strategy 2: Try with minimal vector search pipeline
-      try {
-        console.log("🔄 Attempting minimal vector search...");
-        const minimalVectorPipeline = [
-          {
-            $vectorSearch: {
-              index: "vector_index",
-              path: "embedding",
-              queryVector: embedding,
-              numCandidates: 100,
-              limit: 50
-            }
+      let normalSearchResults: any[] = [];
+      const directPipeline = [
+        {
+          $match: {
+            tenantId: tenantId
           }
-        ];
-        
-        rawResults = await this.dbConfig.collection
-          .aggregate(minimalVectorPipeline)
-          .toArray();
-          
-        console.log(`✅ Minimal vector search successful: ${rawResults.length} results`);
-        
-        // Filter in memory
-        const filteredResults = rawResults.filter(doc => 
-          doc.workbookId === workbookId && doc.tenantId === tenantId
-        );
-        
-        rawResults = filteredResults.slice(0, topK);
-        
-      } catch (minimalError: any) {
-        console.log("⚠️  Minimal vector search also failed, falling back to direct search...");
-        console.log("❌ Minimal vector search error:", minimalError.message || minimalError);
-        
-        // Strategy 3: Fallback to direct search
-        const directPipeline = [
-          {
-            $match: {
-              workbookId: workbookId,
-              tenantId: tenantId
-            }
-          },
-          {
-            $project: {
-              _id: 1,
-              tenantId: 1,
-              workbookId: 1,
-              sheetId: 1,
-              semanticString: 1,
-              metric: 1,
-              normalizedMetric: 1,
-              value: 1,
-              year: 1,
-              quarter: 1,
-              month: 1,
-              region: 1,
-              product: 1,
-              customerId: 1,
-              customerName: 1,
-              department: 1,
-              status: 1,
-              priority: 1,
-              score: 1
-            }
-          },
-          { $sort: { year: -1, quarter: 1, month: 1 } },
-          { $limit: topK }
-        ];
+        },
+        {
+          $project: {
+            _id: 1,
+            tenantId: 1,
+            workbookId: 1,
+            sheetId: 1,
+            sheetName: 1,
+            semanticString: 1,
+            metric: 1,
+            value: 1,
+            year: 1,
+            month: 1,
+            dimensions: 1,
+            score: 1
+          }
+        },
+        { $sort: { year: -1, month: 1 } },
+        { $limit: topK }
+      ];
 
-        console.log("📑 Direct Search Pipeline (Strategy 3):", JSON.stringify(directPipeline, null, 2));
-        
-        rawResults = await this.dbConfig.collection
-          .aggregate(directPipeline)
-          .toArray();
+      console.log("📑 Direct Search Pipeline (Strategy 3):", JSON.stringify(directPipeline, null, 2));
+      
+      normalSearchResults = await this.dbConfig.collection
+        .aggregate(directPipeline)
+        .toArray();
 
-        console.log(`✅ Direct search returned ${rawResults.length} results`);
-      }
+      console.log(`✅ Direct search returned ${normalSearchResults.length} results`);
     }
 
-    // Transform MongoDB documents to SearchResult interface
-    const results: SearchResult[] = rawResults.map((doc: any) => ({
-      _id: doc._id,
-      tenantId: doc.tenantId,
-      workbookId: doc.workbookId,
-      sheetId: doc.sheetId,
-      semanticString: doc.semanticString,
-      metric: doc.metric,
-      normalizedMetric: doc.normalizedMetric || doc.metric, // Fallback to metric if normalizedMetric doesn't exist
-      value: doc.value,
-      year: doc.year,
-      quarter: doc.quarter,
-      month: doc.month,
-      region: doc.region,
-      product: doc.product,
-      customerId: doc.customerId,
-      customerName: doc.customerName,
-      department: doc.department,
-      status: doc.status,
-      priority: doc.priority,
-      score: doc.score || 0
-    }));
-
-    console.log(`✅ Vector search retrieved ${results.length} results`);
-    return results;
+    console.log(`✅ Vector search retrieved ${rawResults.length} results`);
+    return rawResults;
   }
 
   /**
    * Stage 2: Semantic Dictionary-Based Structured Data Retrieval
-   * Uses semantic dictionary analysis to retrieve complete structured data
    */
   private async retrieveStructuredDataWithSemantics(
     vectorResults: SearchResult[],
@@ -378,21 +491,17 @@ export class EnhancedSearch {
 
     console.log("📊 Stage 2: Semantic dictionary-based structured data retrieval");
 
-    // Extract unique identifiers from vector search results
-    const workbookIds = [...new Set(vectorResults.map(r => r.workbookId))];
-    const sheetIds = [...new Set(vectorResults.map(r => r.sheetId))];
-    const metrics = [...new Set(vectorResults.map(r => r.metric))]; // Use actual metric field
-
+    const workbookIds = Array.from(new Set(vectorResults.map(r => r.workbookId)));
+    const sheetIds = Array.from(new Set(vectorResults.map(r => r.sheetId)));
+    const metrics = Array.from(new Set(vectorResults.map(r => r.metric)));
     console.log("🔍 Semantic-based structured data query with:", {
       workbookIds,
       sheetIds,
       metrics,
       filters,
-      extractedMetrics: enhancedQuery.metrics,
       extractedDimensions: enhancedQuery.dimensions
     });
 
-    // Build structured data query based on semantic dictionary analysis
     const structuredPipeline: any[] = [
       {
         $match: {
@@ -400,11 +509,8 @@ export class EnhancedSearch {
           sheetId: { $in: sheetIds },
           ...(filters.tenantId && { tenantId: filters.tenantId }),
           ...(filters.year && { year: filters.year }),
-          ...(filters.quarter && { quarter: filters.quarter }),
           ...(filters.month && { month: filters.month }),
-          ...(filters.region && { region: filters.region }),
-          ...(filters.product && { product: filters.product }),
-          ...(filters.customerId && { customerId: filters.customerId })
+          ...(filters.quarter && { quarter: filters.quarter })
         }
       },
       {
@@ -413,24 +519,23 @@ export class EnhancedSearch {
           tenantId: 1,
           workbookId: 1,
           sheetId: 1,
+          sheetName: 1,
           semanticString: 1,
-          metric: 1,
-          normalizedMetric: 1,
+          rowName: 1,
+          colName: 1,
+          rowIndex: 1,
+          colIndex: 1,
+          cellAddress: 1,
+          rawValue: 1,
           value: 1,
-          year: 1,
-          quarter: 1,
-          month: 1,
-          region: 1,
-          product: 1,
-          customerId: 1,
-          customerName: 1,
-          department: 1,
-          status: 1,
-          priority: 1,
-          score: 1
+          dataType: 1,
+          unit: 1,
+          features: 1,
+          sourceCell: 1,
+          sourceFormula: 1
         }
       },
-      { $sort: { year: -1, quarter: 1, month: 1 } }
+      { $sort: { year: -1, month: 1 } }
     ];
 
     console.log("📑 Semantic-Based Structured Data Pipeline:", JSON.stringify(structuredPipeline, null, 2));
@@ -439,27 +544,28 @@ export class EnhancedSearch {
       .aggregate(structuredPipeline)
       .toArray();
 
-    // Transform MongoDB documents to SearchResult interface
     const results: SearchResult[] = rawResults.map((doc: any) => ({
       _id: doc._id,
       tenantId: doc.tenantId,
       workbookId: doc.workbookId,
       sheetId: doc.sheetId,
-      semanticString: doc.semanticString,
+      sheetName: doc.sheetName || 'Unknown',
+      rowName: doc.rowName,
+      colName: doc.colName,
+      rowIndex: doc.rowIndex,
+      colIndex: doc.colIndex,
+      cellAddress: doc.cellAddress,
+      dataType: doc.dataType,
+      unit: doc.unit,
+      features: doc.features,
+      sourceCell: doc.sourceCell,
+      sourceFormula: doc.sourceFormula,
       metric: doc.metric,
-      normalizedMetric: doc.normalizedMetric,
       value: doc.value,
       year: doc.year,
-      quarter: doc.quarter,
       month: doc.month,
-      region: doc.region,
-      product: doc.product,
-      customerId: doc.customerId,
-      customerName: doc.customerName,
-      department: doc.department,
-      status: doc.status,
-      priority: doc.priority,
-      score: doc.score || 0
+      quarter: doc.quarter,
+      dimensions: doc.dimensions || {},
     }));
 
     console.log(`✅ Retrieved ${results.length} semantic-based structured data points`);
@@ -467,112 +573,7 @@ export class EnhancedSearch {
   }
 
   /**
-   * Fallback structured data retrieval method
-   */
-  private async retrieveStructuredDataFallback(
-    vectorResults: SearchResult[],
-    filters: any
-  ): Promise<SearchResult[]> {
-    if (!this.dbConfig) {
-      throw new Error("Database not connected. Call connect() first.");
-    }
-    
-    console.log("📊 Stage 2: Fallback structured data retrieval");
-
-    // Extract unique identifiers from vector search results
-    const workbookIds = [...new Set(vectorResults.map(r => r.workbookId))];
-    const sheetIds = [...new Set(vectorResults.map(r => r.sheetId))];
-    const metrics = [...new Set(vectorResults.map(r => r.metric))]; // Use actual metric field, not normalizedMetric
-
-    console.log("🔍 Building structured data query with:", {
-      workbookIds,
-      sheetIds,
-      metrics,
-      filters
-    });
-
-    // Build structured data query - use fields that actually exist in the database
-    const structuredPipeline: any[] = [
-      {
-        $match: {
-          workbookId: { $in: workbookIds },
-          sheetId: { $in: sheetIds },
-          // Remove normalizedMetric filter since it doesn't exist in the database
-          ...(filters.tenantId && { tenantId: filters.tenantId }),
-          ...(filters.year && { year: filters.year }),
-          ...(filters.quarter && { quarter: filters.quarter }),
-          ...(filters.month && { month: filters.month }),
-          ...(filters.region && { region: filters.region }),
-          ...(filters.product && { product: filters.product }),
-          ...(filters.customerId && { customerId: filters.customerId })
-        }
-      },
-      {
-        $project: {
-          _id: 1,
-          tenantId: 1,
-          workbookId: 1,
-          sheetId: 1,
-          semanticString: 1,
-          metric: 1,
-          normalizedMetric: 1,
-          value: 1,
-          year: 1,
-          quarter: 1,
-          month: 1,
-          region: 1,
-          product: 1,
-          customerId: 1,
-          customerName: 1,
-          department: 1,
-          status: 1,
-          priority: 1,
-          score: 1
-        }
-      },
-      { $sort: { year: -1, quarter: 1, month: 1 } }
-    ];
-
-    console.log("📑 Structured Data Pipeline:", JSON.stringify(structuredPipeline, null, 2));
-
-    const rawResults = await this.dbConfig.collection
-      .aggregate(structuredPipeline)
-      .toArray();
-
-    console.log(`🔍 Raw structured data results: ${rawResults.length} documents`);
-    if (rawResults.length > 0) {
-      console.log("📋 Sample raw document:", JSON.stringify(rawResults[0], null, 2));
-    }
-
-    const results: SearchResult[] = rawResults.map((doc: any) => ({
-      _id: doc._id,
-      tenantId: doc.tenantId,
-      workbookId: doc.workbookId,
-      sheetId: doc.sheetId,
-      semanticString: doc.semanticString,
-      metric: doc.metric,
-      normalizedMetric: doc.normalizedMetric,
-      value: doc.value,
-      year: doc.year,
-      quarter: doc.quarter,
-      month: doc.month,
-      region: doc.region,
-      product: doc.product,
-      customerId: doc.customerId,
-      customerName: doc.customerName,
-      department: doc.department,
-      status: doc.status,
-      priority: doc.priority,
-      score: doc.score || 0
-    }));
-
-    console.log(`✅ Retrieved ${results.length} structured data points (fallback)`);
-    return results;
-  }
-
-  /**
    * Stage 3: LLM Answer Generation
-   * Sends structured data to LLM for intelligent answer generation
    */
   private async generateLLMAnswer(
     enhancedQuery: EnhancedQuery,
@@ -586,7 +587,8 @@ export class EnhancedSearch {
         confidence: 0.1,
         reasoning: "Gemini LLM model not initialized",
         dataPoints: structuredData.length,
-        sources: []
+        sources: [],
+        generatedTable: ""
       };
     }
 
@@ -598,20 +600,18 @@ export class EnhancedSearch {
 
     console.log("🤖 Stage 3: Generating Gemini LLM answer");
 
-    // Prepare context for LLM
     const contextData = this.prepareLLMContext(structuredData);
-    
     const prompt = this.buildLLMPrompt(enhancedQuery, contextData, originalQuery);
 
     try {
-      // Use Gemini's generateContent method
       const result = await this.llmModel.generateContent(prompt);
+      console.log("🔍 Gemini LLM response:", result.response.text());
       const text = result.response.text() || 'No response generated';
 
       console.log("✅ Gemini LLM response generated successfully");
 
-      // Parse LLM response
-      return this.parseLLMResponse(text, structuredData.length);
+      const parsedResponse = this.parseLLMResponse(text, structuredData.length);
+      return parsedResponse.llmResponse;
     } catch (error) {
       console.error("❌ Gemini LLM generation failed:", error);
       console.error("Error details:", JSON.stringify(error, null, 2));
@@ -620,92 +620,137 @@ export class EnhancedSearch {
         confidence: 0.3,
         reasoning: `Gemini LLM generation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
         dataPoints: structuredData.length,
-        sources: []
+        sources: [],
+        generatedTable: ""
       };
     }
   }
 
-  private prepareLLMContext(data: SearchResult[]): string {
+  /**
+   * Prepare LLM context from structured data
+   */
+  private prepareLLMContext(data: SearchResult[]): { context: string } {
     if (!data || data.length === 0) {
-      return "No structured data available for analysis.";
+      return {
+        context: "No structured data available for analysis.",
+      };
     }
 
     console.log("🧠 Preparing LLM context with data:", data.length, "items");
     
-    // Group data by semantic string and metric for better context
-    const groupedData = new Map<string, any[]>();
+    const groupedData: Map<string, {
+      workbookId: string;
+      sheetName: string;
+      rowName: string;
+      colName: string;
+      year?: string;
+      month?: string;
+      quarter?: string;
+      value: string;
+      features: any;
+      dimensions: any;
+      dataType: string;
+      unit: string;
+    }[]> = new Map();
     
-    data.forEach(item => {
-      // Use semanticString if available, otherwise fall back to metric
-      const semanticKey = item.semanticString || item.metric || 'unknown';
-      const key = `${semanticKey}_${item.year || 'unknown'}_${item.quarter || 'unknown'}`;
+    data.forEach((item) => {
+      const key = `${item.sheetName}_${item.metric}`;
+      
+      const groupedItem: {
+        workbookId: string;
+        sheetName: string;
+        rowName: string;
+        colName: string;
+        year?: string;
+        month?: string;
+        quarter?: string;
+        value: string;
+        features: any;
+        dimensions: any;
+        dataType: string;
+        unit: string;
+      } = {
+        workbookId: item.workbookId,
+        sheetName: item.sheetName || 'Unknown',
+        rowName: item.rowName || 'Unknown',
+        colName: item.colName || 'Unknown',
+        value: String(item.value || 'N/A'),
+        features: item.features || {},
+        dimensions: item.dimensions || {},
+        dataType: item.dataType || 'unknown',
+        unit: item.unit || 'N/A'
+      };
+      
+      if (item.dataType === "date") {
+        if (item.year) groupedItem.year = String(item.year);
+        if (item.month) groupedItem.month = item.month;
+        if (item.quarter) groupedItem.quarter = item.quarter;
+      }
       
       if (!groupedData.has(key)) {
         groupedData.set(key, []);
       }
-      groupedData.get(key)!.push(item);
+      groupedData.get(key)!.push(groupedItem);
     });
 
-    let context = `Available data points (${data.length} total):\n`;
-    groupedData.forEach((items, key) => {
-      const [semanticKey, year, quarter] = key.split('_');
-      const values = items.map(item => ({
-        value: item.value,
-        region: item.region,
-        product: item.product,
-        customer: item.customerName,
-        month: item.month,
-        sheetId: item.sheetId
-      }));
-      
-      context += `\n📊 ${semanticKey} (${year} ${quarter}):\n`;
-      values.forEach(v => {
-        context += `  - Value: ${v.value}`;
-        if (v.region) context += ` | Region: ${v.region}`;
-        if (v.product) context += ` | Product: ${v.product}`;
-        if (v.customer) context += ` | Customer: ${v.customer}`;
-        if (v.month) context += ` | Month: ${v.month}`;
-        if (v.sheetId) context += ` | Sheet: ${v.sheetId}`;
-        context += '\n';
-      });
-    });
+    const contextData = {
+      totalDataPoints: data.length,
+      groupedData: groupedData.values()
+    };
+
+    const context = JSON.stringify(contextData, null, 2);
 
     console.log("✅ LLM context prepared with", groupedData.size, "grouped data points");
-    return context;
+    return { context };
   }
 
-  private buildLLMPrompt(enhancedQuery: EnhancedQuery, contextData: string, originalQuery: string): string {
+  /**
+   * Build LLM prompt with context and instructions
+   */
+  private buildLLMPrompt(enhancedQuery: EnhancedQuery, contextData: any, originalQuery: string): string {
     return `You are a financial data analyst assistant. You have access to structured financial data and need to provide accurate, insightful answers based on the available data.
 
 ORIGINAL USER QUERY: "${originalQuery}"
-SEMANTIC NORMALIZATION: "${enhancedQuery.normalizedQuery}"
-EXTRACTED METRICS: ${enhancedQuery.metrics.join(', ') || 'None detected'}
-EXTRACTED DIMENSIONS: ${enhancedQuery.dimensions.join(', ') || 'None detected'}
-TIME FILTERS: ${JSON.stringify(enhancedQuery.timeFilters)}
 
-${contextData}
+CONTEXT DATA:
+${contextData.context}
 
 INSTRUCTIONS:
-1. Analyze the available data to answer the user's question
-2. Provide specific numbers and insights when possible
-3. If the data is insufficient, clearly state what's missing
-4. Use business-friendly language
-5. Include relevant context about time periods, regions, or other dimensions
-6. If calculations are needed, show your reasoning
-7. Reference specific data points and values from the context
-8. If you see patterns in the data, highlight them
+1. Understand the query thoroughly and analyze the context data provided
+2. If additional data is needed, inform the user about it and continue with generating the result
+3. Based on the query type, provide appropriate analysis:
+   - If the result is to list out, list the results according to the context data
+   - If the result is to calculate, calculate the result according to the context data
+   - If the result is to show, show the result according to the context data
+   - If the result is to compare, compare the results according to the context data
+   - If the result is to analyze, analyze the results according to the context data
+   - If the result is to summarize, summarize the results according to the context data
+   - If the result is to predict, predict the results according to the context data
+   - If the result is to trend, trend the results according to the context data
+   - If the result is to forecast, forecast the results according to the context data
 
-Please provide your answer in the following format:
-ANSWER: [Your detailed answer here]
-CONFIDENCE: [High/Medium/Low based on data completeness]
-REASONING: [Brief explanation of how you arrived at the answer]
-DATA_POINTS_USED: [Number of relevant data points]
-KEY_INSIGHTS: [2-3 key takeaways from the data]`;
+4. Provide your insights to the user
+
+5. IMPORTANT: Create a dynamic table structure that best represents your analysis:
+   - Have appropriate headers based on the data you're presenting
+   - Include relevant rows with actual data from the context
+   - Use proper HTML table structure with <table>, <thead>, <tbody>, <tr>, <th>, <td> tags
+   - Be structured to clearly present the key findings from your analysis
+
+6. Format your response as follows:
+   ANSWER: [Your detailed answer here]
+   CONFIDENCE: [High/Medium/Low]
+   REASONING: [Your reasoning process]
+   KEY_INSIGHTS: [Key insights from the analysis]
+   
+   [Your dynamic table here using proper HTML table tags]`;
   }
 
-  private parseLLMResponse(response: string, dataPointCount: number): LLMResponse {
+  /**
+   * Parse LLM response and extract structured data
+   */
+  private parseLLMResponse(response: string, dataPointCount: number): { llmResponse: LLMResponse; generatedTable: string } {
     try {
-      // Extract structured parts from LLM response
       const answerMatch = response.match(/ANSWER:\s*(.+?)(?=\n|$)/i);
       const confidenceMatch = response.match(/CONFIDENCE:\s*(.+?)(?=\n|$)/i);
       const reasoningMatch = response.match(/REASONING:\s*(.+?)(?=\n|$)/i);
@@ -715,21 +760,29 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
         (confidenceMatch[1].toLowerCase().includes('high') ? 0.9 :
          confidenceMatch[1].toLowerCase().includes('medium') ? 0.6 : 0.3) : 0.5;
 
-      return {
+      const tableMatch = response.match(/(<table[^>]*>[\s\S]*?<\/table>)/i);
+      const generatedTable = tableMatch ? tableMatch[1] : '';
+
+      const llmResponse: LLMResponse = {
         answer: answerMatch ? answerMatch[1].trim() : response.trim(),
         confidence,
         reasoning: reasoningMatch ? reasoningMatch[1].trim() : "Analysis based on available data",
         dataPoints: dataPointCount,
-        sources: insightsMatch ? [insightsMatch[1].trim()] : []
+        sources: insightsMatch ? [insightsMatch[1].trim()] : [],
+        generatedTable: generatedTable
       };
+
+      return { llmResponse, generatedTable };
     } catch (error) {
-      return {
+      const llmResponse: LLMResponse = {
         answer: response.trim(),
         confidence: 0.5,
         reasoning: "Response parsing failed, returning raw LLM output",
         dataPoints: dataPointCount,
-        sources: []
+        sources: [],
+        generatedTable: ''
       };
+      return { llmResponse, generatedTable: '' };
     }
   }
 
@@ -740,7 +793,7 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
     tenantId,
     workbookId,
     query,
-    topK = 50
+    topK = 500
   }: {
     tenantId: string;
     workbookId: string;
@@ -752,6 +805,7 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
     vectorResults: SearchResult[];
     structuredData: SearchResult[];
     llmResponse: LLMResponse;
+    generatedTable: string;
     searchMetadata: {
       queryEnhancementTime: number;
       vectorSearchTime: number;
@@ -764,12 +818,12 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
       throw new Error("Database not connected. Call connect() first.");
     }
 
-    console.log("🚀 Starting improved enhanced semantic search pipeline");
-    console.log(`🔍 Query: "${query}"`);
+    console.log("🚀 Starting enhanced semantic search pipeline (No Query Normalization)");
+    console.log(`🔍 Original Query: "${query}"`);
 
     const startTime = Date.now();
 
-    // 1️⃣ Enhanced Query Normalization with Semantic Dictionary
+    // 1️⃣ Query Processing (No Normalization - Original Query Preserved)
     const queryEnhancementStart = Date.now();
     const enhancedQuery = await this.enhanceQueryNormalization(query);
     const queryEnhancementTime = Date.now() - queryEnhancementStart;
@@ -777,7 +831,7 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
     // 2️⃣ Stage 1: Vector Search with proper filtering
     const vectorStartTime = Date.now();
     const vectorResults = await this.performVectorSearch(
-      enhancedQuery.normalizedQuery,
+      enhancedQuery.originalQuery,
       workbookId,
       tenantId,
       topK
@@ -797,10 +851,13 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
     const llmStartTime = Date.now();
     const llmResponse = await this.generateLLMAnswer(
       enhancedQuery,
-      structuredData,
+      vectorResults,
       query
     );
     const llmGenerationTime = Date.now() - llmStartTime;
+
+    // Extract the generated table from the LLM response
+    const generatedTable = llmResponse.generatedTable || '';
 
     const totalTime = Date.now() - startTime;
 
@@ -814,6 +871,7 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
       vectorResults,
       structuredData,
       llmResponse,
+      generatedTable,
       searchMetadata: {
         queryEnhancementTime,
         vectorSearchTime,
@@ -824,7 +882,10 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
     };
   }
 
-  async disconnect() {
+  /**
+   * Disconnect from database
+   */
+  async disconnect(): Promise<void> {
     if (this.dbConfig) {
       await this.dbConfig.client.close();
       this.dbConfig = null;
@@ -832,8 +893,10 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
     }
   }
 
-  // Database exploration and testing methods
-  async exploreDatabase() {
+  /**
+   * Explore database content
+   */
+  async exploreDatabase(): Promise<{ totalDocs: number; hasData: boolean }> {
     if (!this.dbConfig) {
       throw new Error("Database not connected. Call connect() first.");
     }
@@ -852,10 +915,10 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
             tenantId: doc.tenantId,
             workbookId: doc.workbookId,
             metric: doc.metric,
-            normalizedMetric: doc.normalizedMetric,
             year: doc.year,
+            month: doc.month,
             quarter: doc.quarter,
-            region: doc.region,
+            sheetName: doc.sheetName,
             hasEmbedding: !!doc.embedding
           });
         });
@@ -868,7 +931,10 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
     }
   }
 
-  async findAvailableCombinations() {
+  /**
+   * Find available tenant/workbook combinations
+   */
+  async findAvailableCombinations(): Promise<Array<{ tenantId: string; workbookId: string; count: number }>> {
     if (!this.dbConfig) {
       throw new Error("Database not connected. Call connect() first.");
     }
@@ -913,7 +979,10 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
     }
   }
 
-  async testWithAvailableData() {
+  /**
+   * Test search with available data
+   */
+  async testWithAvailableData(): Promise<void> {
     if (!this.dbConfig) {
       throw new Error("Database not connected. Call connect() first.");
     }
@@ -928,7 +997,6 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
         return;
       }
 
-      // Test with the first available combination
       const testCombo = combinations[0];
       console.log(`\n🔍 Testing with: ${testCombo.tenantId}/${testCombo.workbookId}`);
 
@@ -959,26 +1027,6 @@ KEY_INSIGHTS: [2-3 key takeaways from the data]`;
       throw error;
     }
   }
-
-  async run() {
-    await this.connect();
-
-    const results = await this.semanticSearch({
-      tenantId: "tenant1234",
-      workbookId: "wb_abc123",
-      query: "What was the average bottom line performance in 2021?",
-      topK: 25
-    });
-
-    console.log("📊 Enhanced Search Results:");
-    console.log("Query:", results.query);
-    console.log("Enhanced Query:", results.enhancedQuery.normalizedQuery);
-    console.log("Normalization Method:", results.enhancedQuery.businessContext);
-    console.log("LLM Answer:", results.llmResponse.answer);
-    console.log("Confidence:", results.llmResponse.confidence);
-    console.log("Data Points Used:", results.llmResponse.dataPoints);
-    console.log("Search Metadata:", results.searchMetadata);
-
-    await this.disconnect();
-  }
 }
+
+  
