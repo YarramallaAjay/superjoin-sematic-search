@@ -44,19 +44,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Create uploads directory if it doesn't exist
-    const uploadsDir = join(process.cwd(), '..', '..', 'uploads');
-    if (!existsSync(uploadsDir)) {
-      await mkdir(uploadsDir, { recursive: true });
-    }
+    // // Create uploads directory if it doesn't exist
+    // const uploadsDir = join(process.cwd(), '..', '..', 'uploads');
+    // if (!existsSync(uploadsDir)) {
+    //   await mkdir(uploadsDir, { recursive: true });
+    // }
 
     // Save file to uploads directory
-    const fileName = `${Date.now()}-${file.name}`;
-    const filePath = join(uploadsDir, fileName);
+    const fileName =file.name;
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
     
-    await writeFile(filePath, buffer);
 
     // Generate tenant and workbook IDs
     const tenantId = `tenant_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -122,18 +120,15 @@ export async function POST(request: NextRequest) {
         throw new Error('parseAnd_upload_cells is not a function. Import failed.');
       }
       
-      console.log('📊 Parsing Excel file and generating embeddings...');
       const parsedCells = await parseAnd_upload_cells(
         tenantId,
         workbookId,
         buffer,
         async (cell: EnhancedParsedCell, cellId: string) => {
           // Callback for each parsed cell (can be used for progress tracking)
-          console.log(`📊 Parsed cell ${cellId}: ${cell.metric} = ${cell.value}`);
         },
         async (sheetName: string, rowCount: number, colCount: number, cellCount: number) => {
           // Callback for each parsed sheet
-          console.log(`📄 Sheet ${sheetName}: ${rowCount} rows, ${colCount} cols, ${cellCount} cells`);
           
           // Create sheet record
           try {
@@ -152,23 +147,19 @@ export async function POST(request: NextRequest) {
               updatedAt: new Date()
             });
           } catch (sheetError) {
-            console.warn(`Could not create sheet record for ${sheetName}:`, sheetError);
           }
         }
       );
 
-      console.log(`✅ Parsing complete: ${parsedCells.length} cells parsed`);
       
       if (parsedCells.length === 0) {
         throw new Error('No cells were parsed from the Excel file. Please check the file format.');
       }
 
       // Store cells in database
-      console.log(`💾 Storing ${parsedCells.length} cells in database...`);
       const storageResult = await storeCellsEnhanced(parsedCells);
       
       if (!storageResult.success) {
-        console.error(`❌ Storage failed: ${storageResult.errorCount} errors`);
         throw new Error(`Database storage failed: ${storageResult.errorCount} cells could not be stored`);
       }
 

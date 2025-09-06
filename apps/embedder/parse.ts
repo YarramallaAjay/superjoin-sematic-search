@@ -89,10 +89,6 @@ export class ExcelParser {
     const wb = XLSX.read(buffer, { type: "buffer" });
     const allCells: EnhancedParsedCell[] = [];
 
-    console.log("📊 Starting INTELLIGENT workbook parsing...");
-    console.log("   → Coded rows (CUST_001) → use headers (customer_region)");
-    console.log("   → Normal rows (John Smith) → use RowName_ColName format");
-    console.log("   → Semantic format: 'SheetName | SemanticPart | Year | Month'");
 
     for (const sheetName of wb.SheetNames) {
       const ws = wb.Sheets[sheetName];
@@ -102,12 +98,10 @@ export class ExcelParser {
       const maxRow = range.e.r;
       const maxCol = range.e.c;
       
-      console.log(`📄 Sheet: ${sheetName} (${maxRow + 1} rows, ${maxCol + 1} columns)`);
 
       // Parse the sheet synchronously
       const sheetCells = this.parseSheet(ws, sheetName, maxRow, maxCol, tenantId, workbookId);
       
-      console.log(`   → Parsed ${sheetCells.length} cells from sheet ${sheetName}`);
 
       // Call the callback for each cell
       for (const cell of sheetCells) {
@@ -121,7 +115,6 @@ export class ExcelParser {
       allCells.push(...sheetCells);
     }
 
-    console.log(`📊 Total cells parsed: ${allCells.length}`);
 
     // Generate embeddings for all cells at once
     const semanticStrings = allCells.map(cell => ({
@@ -180,21 +173,35 @@ export class ExcelParser {
           continue;
         }
 
-        // Process both numeric values and dates
+        // Process values with improved type detection
         let processedValue: any = null;
         let dataType: "number" | "string" | "date" | "percent" | "ratio" = "string";
         
-        // Check if it's a date first
+        // First, check if it's explicitly a date (string patterns only)
         if (this.isDateValue(cellValue)) {
           processedValue = cellValue;
           dataType = "date";
-        } else {
-          // Try to parse as numeric value
+        } else if (this.isNumeric(cellValue)) {
+          // Parse as numeric value (integers, floats, decimals, percentages)
           const numericValue = this.parseNumericValue(cellValue);
-          if (numericValue === null) continue; // Skip non-numeric, non-date values
-          
-          processedValue = numericValue;
-          dataType = "number";
+          if (numericValue !== null) {
+            processedValue = numericValue;
+            
+            // Determine if it's a percentage based on the original value
+            if (typeof cellValue === "string" && cellValue.includes('%')) {
+              dataType = "percent";
+            } else {
+              dataType = "number";
+            }
+          } else {
+            // If numeric parsing failed, treat as string
+            processedValue = String(cellValue);
+            dataType = "string";
+          }
+        } else {
+          // Non-numeric, non-date values are treated as strings
+          processedValue = String(cellValue);
+          dataType = "string";
         }
 
         // Extract row name (first column value) - preserve original value like "CUST_001"
@@ -578,7 +585,7 @@ export class ExcelParser {
   }
 
   /**
-   * Check if a value is a date
+   * Check if a value is a date - FIXED to prevent numeric values from being treated as dates
    */
   private isDateValue(val: any): boolean {
     if (val === null || val === undefined) return false;
@@ -586,19 +593,21 @@ export class ExcelParser {
     // If it's already a Date object
     if (val instanceof Date) return true;
     
-    // If it's a number, check if it's an Excel date (Excel dates are numbers > 1)
+    // NEVER treat raw numbers as dates - this was the main issue
+    // Excel dates should only be detected from string patterns or explicit date formatting
     if (typeof val === "number") {
-      return val > 1 && val < 100000; // Excel date range: 1900-01-01 to 9999-12-31
+      return false; // Numbers are always numeric, never dates
     }
     
-    // If it's a string, check for date patterns
+    // If it's a string, check for explicit date patterns
     if (typeof val === "string") {
-      // Common date patterns
+      const trimmedVal = val.trim();
+      
+      // Only consider it a date if it matches explicit date patterns
       const datePatterns = [
         /^\d{1,2}\/\d{1,2}\/\d{2,4}$/,           // MM/DD/YYYY or M/D/YY
         /^\d{1,2}-\d{1,2}-\d{2,4}$/,             // MM-DD-YYYY or M-D-YY
         /^\d{4}-\d{1,2}-\d{1,2}$/,               // YYYY-MM-DD
-        /^\d{1,2}\/\d{1,2}\/\d{2,4}$/,           // DD/MM/YYYY
         /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{1,2},?\s+\d{4}$/i, // Jan 15, 2023
         /^\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+\d{4}$/i,   // 15 Jan 2023
         /^q[1-4]\s+\d{4}$/i,                      // Q1 2023, Q2 2024
@@ -607,14 +616,14 @@ export class ExcelParser {
         /^fiscal\s*(year|yr)\s*\d{2,4}$/i         // Fiscal Year 23
       ];
       
-      return datePatterns.some(pattern => pattern.test(val.trim()));
+      return datePatterns.some(pattern => pattern.test(trimmedVal));
     }
     
     return false;
   }
 
   /**
-   * Parse numeric value from various formats
+   * Parse numeric value from various formats - IMPROVED to handle more numeric types
    */
   private parseNumericValue(val: any): number | null {
     if (val === null || val === undefined) return null;
@@ -626,8 +635,21 @@ export class ExcelParser {
     
     // If it's a string, try to parse it
     if (typeof val === "string") {
-      // Remove common Excel formatting
-      const cleanVal = val.replace(/[$,%,\s]/g, '').replace(/,/g, '');
+      const trimmedVal = val.trim();
+      
+      // Skip empty strings
+      if (trimmedVal === '') return null;
+      
+      // Remove common Excel formatting but preserve decimal points and negative signs
+      const cleanVal = trimmedVal
+        .replace(/[$,\s]/g, '')  // Remove currency symbols, commas, spaces
+        .replace(/[^\d.-]/g, ''); // Keep only digits, decimal points, and negative signs
+      
+      // Handle percentage values
+      if (trimmedVal.includes('%')) {
+        const percentVal = parseFloat(cleanVal);
+        return !isNaN(percentVal) && isFinite(percentVal) ? percentVal / 100 : null;
+      }
       
       // Try to parse as number
       const parsed = parseFloat(cleanVal);
@@ -638,7 +660,7 @@ export class ExcelParser {
   }
 
   /**
-   * Check if a value is numeric
+   * Check if a value is numeric - IMPROVED to be consistent with parseNumericValue
    */
   private isNumeric(val: any): boolean {
     if (val === null || val === undefined) return false;
@@ -648,7 +670,14 @@ export class ExcelParser {
     }
     
     if (typeof val === "string") {
-      const cleanVal = val.replace(/[$,%,\s]/g, '').replace(/,/g, '');
+      const trimmedVal = val.trim();
+      if (trimmedVal === '') return false;
+      
+      // Remove common Excel formatting but preserve decimal points and negative signs
+      const cleanVal = trimmedVal
+        .replace(/[$,\s]/g, '')  // Remove currency symbols, commas, spaces
+        .replace(/[^\d.-]/g, ''); // Keep only digits, decimal points, and negative signs
+      
       const parsed = parseFloat(cleanVal);
       return !isNaN(parsed) && isFinite(parsed);
     }

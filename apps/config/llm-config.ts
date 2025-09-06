@@ -24,9 +24,9 @@ export interface LLMConfig {
 export const llmConfig: LLMConfig = {
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || 'AIzaSyBcAwm2APnl4vWQw6ro8LiXtPbnCJsUmkI',
-    model: 'gemini-2.5-flash',
+    model: 'gemini-1.5-flash',
     temperature: 0.3,
-    maxTokens: 1000
+    maxTokens: 2000
   },
   mongo: {
     url: process.env.MONGO_DB_URL || 'mongodb+srv://ajay_db_owner:Mongo_SpaaS@cluster0.eedbshd.mongodb.net/SpaaS',

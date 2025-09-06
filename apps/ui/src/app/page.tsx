@@ -45,11 +45,13 @@ export default function Home() {
   const [tableSortBy, setTableSortBy] = useState('semanticString');
   const [tableSortOrder, setTableSortOrder] = useState<'asc' | 'desc'>('asc');
   
-  // Computed filtered and sorted table data
+  
+  // Computed filtered and sorted table data (excluding AI-generated data)
   const filteredTableData = useMemo(() => {
     if (!searchResults?.structuredData) return [];
     
-    let filtered = searchResults.structuredData;
+    // Filter out AI-generated data for the main table
+    let filtered = searchResults.structuredData.filter(item => item.sheetName !== "AI Analysis Results");
     
     // Apply search filter
     if (tableSearchTerm) {
@@ -94,16 +96,12 @@ export default function Home() {
 
   const loadWorkbooks = async () => {
     try {
-      console.log('🔄 Loading workbooks...');
       setIsLoadingWorkbooks(true);
       const response = await apiService.fetchWorkbooks();
-      console.log('📡 API response:', response);
       
       if (response.success) {
         setWorkbooks(response.workbooks);
-        console.log(`✅ Loaded ${response.workbooks.length} workbooks:`, response.workbooks);
       } else {
-        console.error('❌ API returned success: false:', response.error);
         toast({
           title: "Error",
           description: `Failed to load workbooks: ${response.error}`,
@@ -111,7 +109,6 @@ export default function Home() {
         });
       }
     } catch (error) {
-      console.error('❌ Failed to load workbooks:', error);
       toast({
         title: "Error",
         description: `Failed to load available workbooks: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -119,7 +116,6 @@ export default function Home() {
       });
     } finally {
       setIsLoadingWorkbooks(false);
-      console.log('🔄 Workbook loading completed');
     }
   };
 
@@ -535,26 +531,325 @@ export default function Home() {
                     </div>
 
                     {searchResults.llmResponse && (
-                      <Card className="bg-green-50 border-green-200">
+                      <Card className="bg-gradient-to-r from-green-50 to-blue-50 border-green-200">
                         <CardHeader>
-                          <CardTitle className="text-green-800">AI Answer</CardTitle>
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <CardTitle className="text-green-800 flex items-center gap-2">
+                                <span className="text-2xl">🤖</span>
+                                AI Analysis & Response
+                              </CardTitle>
+                              <CardDescription>
+                                Complete AI analysis including answer, reasoning, and key insights
+                              </CardDescription>
+                            </div>
+                          </div>
                         </CardHeader>
-                        <CardContent>
-                          <p className="text-green-900">{searchResults.llmResponse.answer}</p>
-                          <div className="flex items-center gap-4 mt-3 text-sm text-green-700">
-                            <Badge variant="secondary">
-                              Confidence: {Math.round(searchResults.llmResponse.confidence * 100)}%
-                            </Badge>
-                            <Badge variant="secondary">
-                              Data Points: {searchResults.llmResponse.dataPoints}
-                            </Badge>
+                        <CardContent className="space-y-6">
+                          {/* Main Answer */}
+                          <div className="bg-white p-4 rounded-lg border border-green-100">
+                            <h4 className="text-lg font-semibold text-green-800 mb-3 flex items-center gap-2">
+                              <span className="text-xl">💡</span>
+                              Answer
+                            </h4>
+                            <div className="text-green-900 whitespace-pre-wrap leading-relaxed">
+                              {searchResults.llmResponse.answer}
+                            </div>
+                          </div>
+
+                          {/* Reasoning */}
+                          {searchResults.llmResponse.reasoning && (
+                            <div className="bg-white p-4 rounded-lg border border-blue-100">
+                              <h4 className="text-lg font-semibold text-blue-800 mb-3 flex items-center gap-2">
+                                <span className="text-xl">🧠</span>
+                                Reasoning
+                              </h4>
+                              <div className="text-blue-900 whitespace-pre-wrap leading-relaxed">
+                                {searchResults.llmResponse.reasoning}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Key Insights */}
+                          {searchResults.llmResponse.sources && searchResults.llmResponse.sources.length > 0 && (
+                            <div className="bg-white p-4 rounded-lg border border-purple-100">
+                              <h4 className="text-lg font-semibold text-purple-800 mb-3 flex items-center gap-2">
+                                <span className="text-xl">🔍</span>
+                                Key Insights
+                              </h4>
+                              <div className="space-y-2">
+                                {searchResults.llmResponse.sources.map((insight, index) => (
+                                  <div key={index} className="text-purple-900 whitespace-pre-wrap leading-relaxed p-3 bg-purple-50 rounded-lg border border-purple-100">
+                                    {insight}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+
+                          {/* Metadata */}
+                          <div className="bg-white p-4 rounded-lg border border-gray-100">
+                            <h4 className="text-lg font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                              <span className="text-xl">📊</span>
+                              Analysis Metadata
+                            </h4>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                              <div className="text-center">
+                                <div className="text-2xl font-bold text-green-600">
+                                  {Math.round(searchResults.llmResponse.confidence * 100)}%
+                                </div>
+                                <div className="text-sm text-gray-600">Confidence</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-2xl font-bold text-blue-600">
+                                  {searchResults.llmResponse.dataPoints}
+                                </div>
+                                <div className="text-sm text-gray-600">Data Points</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-2xl font-bold text-purple-600">
+                                  {searchResults.llmResponse.sources?.length || 0}
+                                </div>
+                                <div className="text-sm text-gray-600">Insights</div>
+                              </div>
+                              <div className="text-center">
+                                <div className="text-2xl font-bold text-orange-600">
+                                  {searchResults.llmResponse.answer.length}
+                                </div>
+                                <div className="text-sm text-gray-600">Characters</div>
+                              </div>
+                            </div>
                           </div>
                         </CardContent>
                       </Card>
                     )}
 
-                    {/* LLM Generated Table */}
-                    {searchResults.generatedTable && (
+                    {/* AI Analysis Results */}
+                    {searchResults.structuredData && searchResults.structuredData.some(item => item.sheetName === "AI Analysis Results") && (
+                      <Card className="bg-gradient-to-r from-purple-50 to-blue-50 border-purple-200">
+                        <CardHeader>
+                          <CardTitle className="text-purple-800 flex items-center gap-2">
+                            <span className="text-2xl">🤖</span>
+                            AI Analysis Results
+                          </CardTitle>
+                          <CardDescription>
+                            Structured analysis results generated by AI including calculations, comparisons, and insights
+                          </CardDescription>
+                        </CardHeader>
+                        <CardContent>
+                          {(() => {
+                            // Filter AI-generated data
+                            const aiData = searchResults.structuredData.filter(item => item.sheetName === "AI Analysis Results");
+                            
+                            
+                            if (aiData.length === 0) {
+                              
+                              // Create fallback categories from LLM response
+                              const fallbackCategories = [];
+                              
+                              if (searchResults.llmResponse?.answer) {
+                                fallbackCategories.push({
+                                  _id: "fallback_answer",
+                                  metric: "AI Answer",
+                                  rowName: "Response",
+                                  colName: "Content",
+                                  value: searchResults.llmResponse.answer.substring(0, 200) + "...",
+                                  dataType: "string"
+                                });
+                              }
+                              
+                              if (searchResults.llmResponse?.reasoning) {
+                                fallbackCategories.push({
+                                  _id: "fallback_reasoning",
+                                  metric: "AI Reasoning",
+                                  rowName: "Analysis",
+                                  colName: "Process",
+                                  value: searchResults.llmResponse.reasoning.substring(0, 200) + "...",
+                                  dataType: "string"
+                                });
+                              }
+                              
+                              if (searchResults.llmResponse?.sources && searchResults.llmResponse.sources.length > 0) {
+                                searchResults.llmResponse.sources.forEach((source, index) => {
+                                  fallbackCategories.push({
+                                    _id: `fallback_insight_${index}`,
+                                    metric: "Key Insights",
+                                    rowName: `Insight ${index + 1}`,
+                                    colName: "Finding",
+                                    value: source.substring(0, 150) + "...",
+                                    dataType: "string"
+                                  });
+                                });
+                              }
+                              
+                              if (fallbackCategories.length > 0) {
+                                // Use fallback categories
+                                const fallbackGroups = new Map<string, any[]>();
+                                fallbackCategories.forEach(item => {
+                                  if (!fallbackGroups.has(item.metric)) {
+                                    fallbackGroups.set(item.metric, []);
+                                  }
+                                  fallbackGroups.get(item.metric)!.push(item);
+                                });
+                                
+                                return (
+                                  <div className="space-y-6">
+                                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                                      <div className="flex items-center gap-2 text-yellow-800">
+                                        <span className="text-xl">⚠️</span>
+                                        <span className="font-medium">Fallback Analysis</span>
+                                      </div>
+                                      <div className="text-sm text-yellow-700 mt-1">
+                                        AI didn't generate structured data, showing analysis from text response
+                                      </div>
+                                    </div>
+                                    
+                                    {Array.from(fallbackGroups.entries()).map(([groupName, items]) => (
+                                      <div key={groupName} className="bg-white p-4 rounded-lg border border-purple-100">
+                                        <h4 className="text-lg font-semibold text-purple-800 mb-3 flex items-center gap-2">
+                                          <span className="text-xl">📊</span>
+                                          {groupName}
+                                        </h4>
+                                        
+                                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                          {items.map((item, index) => (
+                                            <div key={item._id || index} className="bg-gradient-to-br from-purple-50 to-blue-50 p-4 rounded-lg border border-purple-200">
+                                              <div className="flex items-center justify-between mb-2">
+                                                <span className="text-sm font-medium text-purple-700">
+                                                  {item.rowName || "Analysis Point"}
+                                                </span>
+                                                <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700">
+                                                  {item.dataType}
+                                                </span>
+                                              </div>
+                                              
+                                              <div className="text-sm text-purple-800 mb-1">
+                                                {String(item.value)}
+                                              </div>
+                                              
+                                              <div className="text-xs text-purple-600">
+                                                {item.colName || "Value"}
+                                              </div>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                );
+                              }
+                              
+                              return (
+                                <div className="text-center py-8 text-gray-500">
+                                  <div className="text-4xl mb-4">🤖</div>
+                                  <div className="text-lg font-medium mb-2">No AI Analysis Data</div>
+                                  <div className="text-sm">The AI didn't generate structured analysis data. Check the console for debugging information.</div>
+                                </div>
+                              );
+                            }
+                            
+                            // Improved grouping logic - group by analysis type with better categorization
+                            const analysisGroups = new Map<string, any[]>();
+                            
+                            aiData.forEach((item) => {
+                              // Create more meaningful group keys based on the data
+                              let groupKey = "General Analysis";
+                              
+                              if (item.metric) {
+                                // Use metric as primary grouping
+                                groupKey = item.metric;
+                              } else if ((item as any).rowName && (item as any).colName) {
+                                // Create group from row and column names
+                                groupKey = `${(item as any).rowName} Analysis`;
+                              } else if ((item as any).rowName) {
+                                groupKey = `${(item as any).rowName} Analysis`;
+                              } else if ((item as any).colName) {
+                                groupKey = `${(item as any).colName} Analysis`;
+                              }
+                              
+                              // Categorize by data type for better organization
+                              if ((item as any).dataType === 'number' && typeof item.value === 'number') {
+                                if (item.value > 1000000) {
+                                  groupKey = "Financial Metrics";
+                                } else if (item.value < 1 && item.value > 0) {
+                                  groupKey = "Ratios & Percentages";
+                                } else {
+                                  groupKey = "Numerical Analysis";
+                                }
+                              } else if ((item as any).dataType === 'percent') {
+                                groupKey = "Percentage Analysis";
+                              } else if ((item as any).dataType === 'date') {
+                                groupKey = "Time-based Analysis";
+                              } else if ((item as any).dataType === 'string') {
+                                groupKey = "Text Analysis";
+                              }
+                              
+                              if (!analysisGroups.has(groupKey)) {
+                                analysisGroups.set(groupKey, []);
+                              }
+                              analysisGroups.get(groupKey)!.push(item);
+                            });
+                            
+                            
+                            return (
+                              <div className="space-y-6">
+                                {Array.from(analysisGroups.entries()).map(([groupName, items]) => (
+                                  <div key={groupName} className="bg-white p-4 rounded-lg border border-purple-100">
+                                    <h4 className="text-lg font-semibold text-purple-800 mb-3 flex items-center gap-2">
+                                      <span className="text-xl">📊</span>
+                                      {groupName}
+                                    </h4>
+                                    
+                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                      {items.map((item, index) => (
+                                        <div key={item._id || index} className="bg-gradient-to-br from-purple-50 to-blue-50 p-4 rounded-lg border border-purple-200">
+                                          <div className="flex items-center justify-between mb-2">
+                                            <span className="text-sm font-medium text-purple-700">
+                                              {(item as any).rowName || "Analysis Point"}
+                                            </span>
+                                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                                              (item as any).dataType === 'number' ? 'bg-green-100 text-green-700' :
+                                              (item as any).dataType === 'percent' ? 'bg-purple-100 text-purple-700' :
+                                              (item as any).dataType === 'date' ? 'bg-blue-100 text-blue-700' :
+                                              'bg-gray-100 text-gray-700'
+                                            }`}>
+                                              {(item as any).dataType}
+                                            </span>
+                                          </div>
+                                          
+                                          <div className="text-2xl font-bold text-purple-800 mb-1">
+                                            {(item as any).dataType === 'percent' && typeof item.value === 'number' ? 
+                                              `${(item.value * 100).toFixed(2)}%` :
+                                              typeof item.value === 'number' ? 
+                                                new Intl.NumberFormat('en-IN').format(item.value) :
+                                                String(item.value)
+                                            }
+                                          </div>
+                                          
+                                          <div className="text-sm text-purple-600">
+                                            {(item as any).colName || "Value"}
+                                          </div>
+                                          
+                                          {item.unit && item.unit !== 'N/A' && (
+                                            <div className="text-xs text-purple-500 mt-1">
+                                              Unit: {item.unit}
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })()}
+                        </CardContent>
+                      </Card>
+                    )}
+
+                    {/* LLM Generated Table (Fallback) */}
+                    {searchResults.generatedTable && !searchResults.structuredData?.some(item => item.sheetName === "AI Analysis Results") && (
                       <Card className="bg-blue-50 border-blue-200">
                         <CardHeader>
                           <CardTitle className="text-blue-800">AI Generated Table</CardTitle>
@@ -571,11 +866,11 @@ export default function Home() {
                       </Card>
                     )}
 
-                    {/* Structured Data Table */}
-                    {searchResults.structuredData && searchResults.structuredData.length > 0 && (
+                    {/* Original Search Results Table */}
+                    {searchResults.structuredData && searchResults.structuredData.filter(item => item.sheetName !== "AI Analysis Results").length > 0 && (
                       <div className="mt-6">
                         <h3 className="text-lg font-semibold mb-4 text-gray-800">
-                          Search Results ({searchResults.structuredData.length} items)
+                          Original Search Results ({searchResults.structuredData.filter(item => item.sheetName !== "AI Analysis Results").length} items)
                         </h3>
                         
                         {/* Search and Filter Controls */}
@@ -640,95 +935,203 @@ export default function Home() {
                            </div>
                          </div>
 
-                                                                {/* Row/Column Table Structure */}
-                    <div className="rounded-md border">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>Row</TableHead>
-                            <TableHead>Column</TableHead>
-                            <TableHead>Value</TableHead>
-                            <TableHead>Sheet</TableHead>
-                            <TableHead>Score</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {filteredTableData.map((item, index) => {
-                            // Extract row and column from semantic string or dimensions
-                            const semanticParts = item.semanticString?.split(' | ') || [];
-                            const rowInfo = semanticParts[1] || 'N/A';
-                            const columnInfo = item.metric || 'N/A';
-                            
-                            // Handle date values properly - don't convert to numeric
-                            let displayValue = item.value;
-                            if (item.value !== null && item.value !== undefined) {
-                              // If it's a date (Excel date number), convert it back to readable format
-                              if (typeof item.value === 'number' && item.value > 1 && item.value < 100000) {
-                                // This is likely an Excel date number, convert to readable date
-                                const excelDate = new Date((item.value - 25569) * 86400 * 1000);
-                                displayValue = excelDate.toLocaleDateString();
-                              } else if (typeof item.value === 'string' && item.value.match(/^\d{1,2}\/\d{1,2}\/\d{2,4}$/)) {
-                                // Keep date strings as-is
-                                displayValue = item.value;
-                              } else {
-                                // For numeric values, format them
-                                displayValue = typeof item.value === 'number' ? 
-                                  new Intl.NumberFormat('en-IN').format(item.value) : 
-                                  String(item.value);
-                              }
-                            } else {
-                              displayValue = 'N/A';
+                        {/* Sheet-based Tabbed Interface */}
+                        {(() => {
+                          // Group data by sheet
+                          const sheetData = new Map<string, any[]>();
+                          
+                          filteredTableData.forEach((item) => {
+                            const sheetName = item.sheetName || 'Unknown Sheet';
+                            if (!sheetData.has(sheetName)) {
+                              sheetData.set(sheetName, []);
                             }
-
+                            sheetData.get(sheetName)!.push(item);
+                          });
+                          
+                          const sheetNames = Array.from(sheetData.keys()).sort();
+                          
+                          if (sheetNames.length === 0) {
                             return (
-                              <TableRow key={item._id || index}>
-                                <TableCell>
-                                  <div className="font-medium text-sm">
-                                    {rowInfo}
-                                  </div>
-                                </TableCell>
-                                
-                                <TableCell>
-                                  <div className="font-medium text-sm">
-                                    {columnInfo}
-                                  </div>
-                                </TableCell>
-                                
-                                <TableCell>
-                                  <div className={`text-lg font-bold ${
-                                    typeof item.value === 'number' ? 'text-green-600' : 
-                                    (typeof item.value === 'string' && item.value.match(/^\d{1,2}\/\d{1,2}\/\d{2,4}$/)) ? 'text-blue-600' :
-                                    'text-gray-600'
-                                  }`}>
-                                    {displayValue}
-                                  </div>
-                                  {/* Show time context if available */}
-                                  {(item.year || item.month || item.quarter) && (
-                                    <div className="text-xs text-gray-500 mt-1">
-                                      {item.year && <span className="mr-2">📅 {item.year}</span>}
-                                      {item.month && <span className="mr-2">📆 {item.month}</span>}
-                                      {item.quarter && <span>🗓️ {item.quarter}</span>}
-                                    </div>
-                                  )}
-                                </TableCell>
-                                
-                                <TableCell>
-                                  <div className="text-sm">
-                                    📄 {item.sheetName || item.sheetId?.slice(-8) || 'N/A'}
-                                    </div>
-                                </TableCell>
-                                
-                                <TableCell>
-                                  <div className="text-sm font-mono">
-                                    {item.score?.toFixed(3) || 'N/A'}
-                                </div>
-                                </TableCell>
-                              </TableRow>
-                            );
-                          })}
-                        </TableBody>
-                      </Table>
+                              <div className="text-center py-8 text-gray-500">
+                                No data available to display
                               </div>
+                            );
+                          }
+                          
+                          return (
+                            <Tabs defaultValue={sheetNames[0]} className="w-full">
+                              <TabsList className="grid w-full grid-cols-4 lg:grid-cols-6 xl:grid-cols-8">
+                                {sheetNames.map((sheetName) => (
+                                  <TabsTrigger 
+                                    key={sheetName} 
+                                    value={sheetName}
+                                    className="text-xs truncate"
+                                  >
+                                    {sheetName}
+                                  </TabsTrigger>
+                                ))}
+                              </TabsList>
+                              
+                              {sheetNames.map((sheetName) => {
+                                const sheetItems = sheetData.get(sheetName) || [];
+                                
+                                // Create pivot table for this sheet
+                                const pivotData = new Map<string, Map<string, any>>();
+                                const allRows = new Set<string>();
+                                const allColumns = new Set<string>();
+                                
+                                sheetItems.forEach((item) => {
+                                  const rowName = item.rowName || 'Unknown Row';
+                                  const colName = item.colName || item.metric || 'Unknown Column';
+                                  
+                                  allRows.add(rowName);
+                                  allColumns.add(colName);
+                                  
+                                  if (!pivotData.has(rowName)) {
+                                    pivotData.set(rowName, new Map());
+                                  }
+                                  
+                                  // Handle values properly based on data type
+                                  let displayValue = item.value;
+                                  if (item.value !== null && item.value !== undefined) {
+                                    if (item.dataType === 'date') {
+                                      // Only format as date if explicitly marked as date type
+                                      if (typeof item.value === 'string' && item.value.match(/^\d{1,2}\/\d{1,2}\/\d{2,4}$/)) {
+                                        displayValue = item.value;
+                                      } else {
+                                        displayValue = String(item.value);
+                                      }
+                                    } else if (item.dataType === 'percent') {
+                                      // Format percentage values
+                                      displayValue = typeof item.value === 'number' ? 
+                                        `${(item.value * 100).toFixed(2)}%` : 
+                                        String(item.value);
+                                    } else if (item.dataType === 'number') {
+                                      // Format numeric values
+                                      displayValue = typeof item.value === 'number' ? 
+                                        new Intl.NumberFormat('en-IN').format(item.value) : 
+                                        String(item.value);
+                                    } else {
+                                      // String values
+                                      displayValue = String(item.value);
+                                    }
+                                  } else {
+                                    displayValue = 'N/A';
+                                  }
+                                  
+                                  pivotData.get(rowName)!.set(colName, {
+                                    value: displayValue,
+                                    originalValue: item.value,
+                                    sheetName: item.sheetName,
+                                    score: item.score,
+                                    year: item.year,
+                                    month: item.month,
+                                    quarter: item.quarter,
+                                    dataType: item.dataType
+                                  });
+                                });
+                                
+                                const sortedRows = Array.from(allRows).sort();
+                                const sortedColumns = Array.from(allColumns).sort();
+                                
+                                return (
+                                  <TabsContent key={sheetName} value={sheetName} className="mt-4">
+                                    <div className="space-y-4">
+                                      {/* Sheet Header */}
+                                      <div className="flex items-center justify-between">
+                                        <div>
+                                          <h4 className="text-lg font-semibold text-gray-800">
+                                            📄 {sheetName}
+                                          </h4>
+                                          <p className="text-sm text-gray-600">
+                                            {sheetItems.length} data points • {sortedRows.length} rows • {sortedColumns.length} columns
+                                          </p>
+                                        </div>
+                                        <div className="flex gap-2">
+                                          <Badge variant="outline">
+                                            {sortedRows.length} Rows
+                                          </Badge>
+                                          <Badge variant="outline">
+                                            {sortedColumns.length} Columns
+                                          </Badge>
+                                        </div>
+                                      </div>
+                                      
+                                      {/* Sheet Table */}
+                                      <div className="rounded-md border overflow-x-auto">
+                                        <Table>
+                                          <TableHeader>
+                                            <TableRow>
+                                              <TableHead className="sticky left-0 bg-white border-r font-bold min-w-32">
+                                                Row Names
+                                              </TableHead>
+                                              {sortedColumns.map((colName) => (
+                                                <TableHead key={colName} className="min-w-32 text-center font-bold">
+                                                  {colName}
+                                                </TableHead>
+                                              ))}
+                                            </TableRow>
+                                          </TableHeader>
+                                          <TableBody>
+                                            {sortedRows.map((rowName) => (
+                                              <TableRow key={rowName}>
+                                                <TableCell className="sticky left-0 bg-gray-50 border-r font-medium">
+                                                  <div className="font-semibold text-sm">
+                                                    {rowName}
+                                                  </div>
+                                                </TableCell>
+                                                {sortedColumns.map((colName) => {
+                                                  const cellData = pivotData.get(rowName)?.get(colName);
+                                                  
+                                                  if (!cellData) {
+                                                    return (
+                                                      <TableCell key={colName} className="text-center">
+                                                        <div className="text-gray-400 text-sm">-</div>
+                                                      </TableCell>
+                                                    );
+                                                  }
+                                                  
+                                                  return (
+                                                    <TableCell key={colName} className="text-center">
+                                                      <div className={`text-sm font-medium ${
+                                                        cellData.dataType === 'number' ? 'text-green-600' : 
+                                                        cellData.dataType === 'percent' ? 'text-purple-600' :
+                                                        cellData.dataType === 'date' ? 'text-blue-600' :
+                                                        'text-gray-600'
+                                                      }`}>
+                                                        {cellData.value}
+                                                      </div>
+                                                      
+                                                      {/* Show time context if available */}
+                                                      {(cellData.year || cellData.month || cellData.quarter) && (
+                                                        <div className="text-xs text-gray-500 mt-1">
+                                                          {cellData.year && <span className="mr-1">📅{cellData.year}</span>}
+                                                          {cellData.month && <span className="mr-1">📆{cellData.month}</span>}
+                                                          {cellData.quarter && <span>🗓️{cellData.quarter}</span>}
+                                                        </div>
+                                                      )}
+                                                      
+                                                      {/* Show score if available */}
+                                                      {cellData.score && (
+                                                        <div className="text-xs text-gray-400 mt-1 font-mono">
+                                                          {cellData.score.toFixed(3)}
+                                                        </div>
+                                                      )}
+                                                    </TableCell>
+                                                  );
+                                                })}
+                                              </TableRow>
+                                            ))}
+                                          </TableBody>
+                                        </Table>
+                                      </div>
+                                    </div>
+                                  </TabsContent>
+                                );
+                              })}
+                            </Tabs>
+                          );
+                        })()}
 
                         {/* Pagination Info */}
                         <div className="mt-4 text-sm text-gray-500 text-center">

@@ -3,10 +3,7 @@
   "builds": [
     {
       "src": "apps/ui/package.json",
-      "use": "@vercel/next",
-      "config": {
-        "distDir": ".next"
-      }
+      "use": "@vercel/next"
     }
   ],
   "routes": [
@@ -14,13 +11,5 @@
       "src": "/(.*)",
       "dest": "apps/ui/$1"
     }
-  ],
-  "functions": {
-    "apps/ui/src/app/api/**/*.ts": {
-      "runtime": "nodejs18.x"
-    }
-  },
-  "env": {
-    "NODE_ENV": "production"
-  }
+  ]
 }

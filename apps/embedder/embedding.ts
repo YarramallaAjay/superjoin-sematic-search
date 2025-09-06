@@ -78,7 +78,6 @@ export class EmbeddingService {
     try {
       // Validate string before sending to API
       if (!request.semanticString || request.semanticString.trim().length === 0) {
-        console.warn(`⚠️  Skipping empty string for cellId: ${request.cellId}`);
         return {
           cellId: request.cellId,
           embedding: new Array(768).fill(0),
@@ -86,13 +85,11 @@ export class EmbeddingService {
         };
       }
 
-      console.log(`   🔄 Embedding: "${request.semanticString}" (cellId: ${request.cellId}, index: ${globalIndex + 1})`);
       
       const result = await this.retryWithBackoff(async () => {
         return await this.model.embedContent(request.semanticString);
       });
       
-      console.log(`   ✅ Successfully embedded: "${request.semanticString}" for cellId: ${request.cellId}`);
       
       return {
         cellId: request.cellId,
@@ -101,8 +98,6 @@ export class EmbeddingService {
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error(`❌ Failed to embed text for cellId: ${request.cellId}: "${request.semanticString}"`);
-      console.error(`   Error:`, errorMessage);
       
       // Return a zero vector as fallback
       return {

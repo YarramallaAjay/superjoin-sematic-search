@@ -66,19 +66,21 @@ export class EnhancedSearch {
   constructor() {
     this.uri = llmConfig.mongo.url;
     this.client = new MongoClient(this.uri);
-    this.initializeLLM();
+    // Initialize LLM asynchronously - will be awaited in connect()
   }
 
   /**
-   * Connect to the database
+   * Connect to the database and initialize LLM
    */
   async connect(): Promise<void> {
+    // Initialize LLM first
+    await this.initializeLLM();
+    
     const client = await this.client.connect();
     const db = client.db(llmConfig.mongo.database);
     
     // Check which collection has data and supports vector search
     const collections = await db.listCollections().toArray();
-    console.log("📋 Available collections:", collections.map(c => `${c.name} (${c.type || 'collection'})`));
     
     let collection;
     let collectionName = llmConfig.mongo.collections.atlascells;
@@ -89,37 +91,30 @@ export class EnhancedSearch {
       if (atlascellsCount > 0) {
         collection = db.collection(llmConfig.mongo.collections.atlascells);
         collectionName = llmConfig.mongo.collections.atlascells;
-        console.log(`✅ Using atlascells collection (${atlascellsCount} documents) - SUPPORTS VECTOR SEARCH`);
       } else {
         const atlasCellCount = await db.collection(llmConfig.mongo.collections.atlasCell).countDocuments();
         if (atlasCellCount > 0) {
           collection = db.collection(llmConfig.mongo.collections.atlasCell);
           collectionName = llmConfig.mongo.collections.atlasCell;
-          console.log(`✅ Using AtlasCell collection (${atlasCellCount} documents)`);
         } else {
           // Last resort: try analysis view (no vector search support)
           const analysisCount = await db.collection(llmConfig.mongo.collections.analysis).countDocuments();
           if (analysisCount > 0) {
             collection = db.collection(llmConfig.mongo.collections.analysis);
             collectionName = llmConfig.mongo.collections.analysis;
-            console.log(`⚠️  Using analysis view (${analysisCount} documents) - NO VECTOR SEARCH SUPPORT`);
           } else {
             // Default to atlascells
             collection = db.collection(llmConfig.mongo.collections.atlascells);
-            console.log("⚠️  No data found, using atlascells as default");
           }
         }
       }
     } catch (error) {
-      console.error("❌ Error checking collections:", error);
       // Fallback to atlascells
       collection = db.collection(llmConfig.mongo.collections.atlascells);
       collectionName = llmConfig.mongo.collections.atlascells;
-      console.log("🔄 Fallback to atlascells collection");
     }
 
     this.dbConfig = { client, db, collection };
-    console.log(`✅ Connected to DB for enhanced search using ${collectionName} collection`);
   }
 
   /**
@@ -128,6 +123,7 @@ export class EnhancedSearch {
   private async initializeLLM(): Promise<void> {
     try {
       const geminiConfig = llmConfig.gemini;
+      
       const genAI = new GoogleGenerativeAI(geminiConfig.apiKey);
       const model = genAI.getGenerativeModel({ 
         model: geminiConfig.model,
@@ -138,45 +134,207 @@ export class EnhancedSearch {
       });
       
       if (model) {
-        console.log("✅ Gemini LLM model initialized successfully");
-        console.log(`📊 Model: ${geminiConfig.model}, Temperature: ${geminiConfig.temperature}`);
         this.llmModel = model;
       } else {
         throw new Error("Failed to get Gemini model instance");
       }
     } catch (error) {
-      console.error("❌ Failed to initialize Gemini LLM model:", error);
       this.llmModel = null;
     }
   }
 
   /**
-   * No query normalization - use original query as-is
+   * Semantic dictionary-based query normalization
    */
   private async enhanceQueryNormalization(query: string): Promise<EnhancedQuery> {
-    console.log("🔍 No query normalization - using original query");
-    
-    const normalizedQuery = query;
-    const dimensions = this.extractDimensions(query);
-    const timeFilters = this.extractTimeFilters(query);
-
-    console.log("✅ Query processing completed (no normalization)");
-    console.log(`📝 Original query: "${query}"`);
-    console.log(`📝 Query used for search: "${normalizedQuery}"`);
-    console.log(`📊 Dimensions: ${dimensions.join(', ')}`);
-    console.log(`📅 Time Filters: ${JSON.stringify(timeFilters, null, 2)}`);
-    if (timeFilters.year) console.log(`📅 Year: ${timeFilters.year}`);
-    if (timeFilters.month) console.log(`📅 Month: ${timeFilters.month}`);
-    if (timeFilters.quarter) console.log(`📅 Quarter: ${timeFilters.quarter}`);
-    if (timeFilters.period) console.log(`📅 Period: ${timeFilters.period}`);
-
+    const semanticDictionary = this.getSemanticDictionary();
+    const normalizedQuery = this.normalizeQueryWithSemantics(query, semanticDictionary);
+    const dimensions = this.extractDimensions(normalizedQuery);
+    const timeFilters = this.extractTimeFilters(normalizedQuery);
+    const businessContext = this.generateBusinessContext(query, normalizedQuery, semanticDictionary);
     return {
       originalQuery: query,
       normalizedQuery,
       dimensions,
       timeFilters,
-      businessContext: "No query normalization - original query preserved"
+      businessContext
     };
+  }
+
+  /**
+   * Get comprehensive semantic dictionary for business terms
+   * Organized to avoid conflicts and preserve semantic distinctions
+   */
+  private getSemanticDictionary(): Record<string, string[]> {
+    return {
+      // Financial Metrics - Keep distinct categories
+      'revenue': ['sales', 'turnover', 'top line', 'gross revenue', 'net revenue'],
+      'profit': ['net income', 'bottom line', 'profitability', 'gain', 'earnings'],
+      'income': ['earnings', 'revenue', 'income'],
+      'margin': ['profit margin', 'gross margin', 'net margin', 'operating margin', 'ebitda margin'],
+      'cost': ['expense', 'expenditure', 'spending', 'outlay', 'costs', 'expenses'],
+      'growth': ['increase', 'rise', 'expansion', 'yoy', 'year over year', 'growth rate', 'incremental'],
+      
+      // Business Dimensions
+      'customer': ['client', 'buyer', 'purchaser', 'consumer', 'end user', 'account'],
+      'product': ['item', 'goods', 'service', 'offering', 'solution', 'sku'],
+      'region': ['area', 'territory', 'location', 'geography', 'market', 'zone'],
+      'channel': ['route', 'pathway', 'medium', 'platform', 'outlet', 'distribution'],
+      'segment': ['category', 'division', 'group', 'class', 'tier', 'bracket'],
+      
+      // Time Periods
+      'quarterly': ['q1', 'q2', 'q3', 'q4', 'quarter', '3 months'],
+      'monthly': ['month', 'monthly', 'per month', 'each month'],
+      'yearly': ['annual', 'yearly', 'per year', 'yoy', 'year over year'],
+      'daily': ['day', 'daily', 'per day', 'each day'],
+      
+      // Performance Indicators
+      'performance': ['results', 'outcomes', 'metrics', 'kpi', 'indicators', 'measures'],
+      'efficiency': ['productivity', 'effectiveness', 'optimization', 'utilization'],
+      'quality': ['standard', 'grade', 'rating', 'score', 'level'],
+      
+      // Business Operations
+      'sales_activity': ['selling', 'revenue generation', 'business development', 'commercial'],
+      'marketing': ['promotion', 'advertising', 'campaign', 'branding', 'outreach'],
+      'operations': ['processes', 'procedures', 'workflow', 'execution', 'delivery'],
+      'finance': ['financial', 'accounting', 'treasury', 'fiscal', 'monetary'],
+      
+      // Comparative Terms
+      'vs': ['versus', 'compared to', 'against', 'relative to', 'in comparison'],
+      'trend': ['pattern', 'direction', 'trajectory', 'movement', 'change over time'],
+      'forecast': ['prediction', 'projection', 'outlook', 'estimate', 'budget'],
+      'actual': ['real', 'actualized', 'achieved', 'realized', 'current'],
+      
+      // Aggregation Terms
+      'total': ['sum', 'aggregate', 'combined', 'overall', 'cumulative'],
+      'average': ['mean', 'typical', 'standard', 'normal', 'regular'],
+      'maximum': ['max', 'highest', 'peak', 'top', 'best'],
+      'minimum': ['min', 'lowest', 'bottom', 'worst', 'least']
+    };
+  }
+
+  /**
+   * Normalize query using semantic dictionary with conflict detection
+   */
+  private normalizeQueryWithSemantics(query: string, dictionary: Record<string, string[]>): string {
+    let normalizedQuery = query.toLowerCase();
+    const changes: string[] = [];
+    const appliedReplacements = new Set<string>();
+    
+    console.log(`🔍 Starting normalization of: "${normalizedQuery}"`);
+    
+    // First pass: detect potential conflicts
+    const queryWords = normalizedQuery.split(/\s+/);
+    const conflictMap = new Map<string, string[]>();
+    
+    // Build conflict map - which variations map to the same standard term
+    for (const [standardTerm, variations] of Object.entries(dictionary)) {
+      for (const variation of variations) {
+        if (!conflictMap.has(standardTerm)) {
+          conflictMap.set(standardTerm, []);
+        }
+        conflictMap.get(standardTerm)!.push(variation);
+      }
+    }
+    
+    // Check for conflicts in the query
+    const queryConflicts: string[] = [];
+    for (const [standardTerm, variations] of conflictMap.entries()) {
+      const foundVariations = variations.filter(variation => 
+        queryWords.some(word => word.includes(variation.toLowerCase()) || variation.toLowerCase().includes(word))
+      );
+      if (foundVariations.length > 1) {
+        queryConflicts.push(`${standardTerm}: ${foundVariations.join(', ')}`);
+      }
+    }
+    
+    
+    // Apply semantic normalization with conflict resolution
+    const allReplacements: Array<{variation: string, standardTerm: string, priority: number}> = [];
+    
+    // Collect all replacements with priority (longer phrases get higher priority)
+    for (const [standardTerm, variations] of Object.entries(dictionary)) {
+      for (const variation of variations) {
+        allReplacements.push({
+          variation,
+          standardTerm,
+          priority: variation.length + (variation.includes(' ') ? 10 : 0) // Multi-word phrases get higher priority
+        });
+      }
+    }
+    
+    // Sort by priority (highest first)
+    allReplacements.sort((a, b) => b.priority - a.priority);
+    
+    // Apply replacements with conflict detection
+    for (const {variation, standardTerm} of allReplacements) {
+      const escapedVariation = variation.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`\\b${escapedVariation}\\b`, 'gi');
+      
+      // Check if this replacement would create a conflict
+      const matches = normalizedQuery.match(regex);
+      if (matches) {
+        const wouldCreateConflict = matches.some(match => {
+          const replacement = normalizedQuery.replace(regex, standardTerm);
+          return replacement.includes(`${standardTerm} ${standardTerm}`) || 
+                 replacement.includes(`${standardTerm} vs ${standardTerm}`) ||
+                 replacement.includes(`${standardTerm} and ${standardTerm}`);
+        });
+        
+        if (wouldCreateConflict) {
+          console.log(`  ⚠️  Skipping "${variation}" → "${standardTerm}" to avoid conflict`);
+          continue;
+        }
+      }
+      
+      const beforeReplace = normalizedQuery;
+      normalizedQuery = normalizedQuery.replace(regex, standardTerm);
+      
+      if (beforeReplace !== normalizedQuery) {
+        changes.push(`${variation} → ${standardTerm}`);
+        appliedReplacements.add(standardTerm);
+        console.log(`  ✅ Replaced "${variation}" with "${standardTerm}"`);
+      }
+    }
+    
+    // Clean up multiple spaces and normalize punctuation
+    normalizedQuery = normalizedQuery
+      .replace(/\s+/g, ' ')
+      .replace(/[^\w\s]/g, ' ')
+      .trim();
+    
+    console.log(`📝 Normalization result: "${normalizedQuery}"`);
+    if (changes.length > 0) {
+      console.log(`🔄 Changes made: ${changes.join(', ')}`);
+    } else {
+      console.log(`ℹ️  No semantic changes needed`);
+    }
+    
+    return normalizedQuery;
+  }
+
+
+  /**
+   * Generate business context for the normalized query
+   */
+  private generateBusinessContext(originalQuery: string, normalizedQuery: string, dictionary: Record<string, string[]>): string {
+    const changes: string[] = [];
+    
+    // Track what was normalized
+    for (const [standardTerm, variations] of Object.entries(dictionary)) {
+      for (const variation of variations) {
+        if (originalQuery.toLowerCase().includes(variation.toLowerCase()) && 
+            normalizedQuery.includes(standardTerm)) {
+          changes.push(`${variation} → ${standardTerm}`);
+        }
+      }
+    }
+    
+    if (changes.length > 0) {
+      return `Query normalized using semantic dictionary: ${changes.join(', ')}`;
+    }
+    
+    return "Query processed with semantic dictionary (no changes needed)";
   }
 
   /**
@@ -573,55 +731,82 @@ export class EnhancedSearch {
   }
 
   /**
-   * Stage 3: LLM Answer Generation
+   * Stage 3: LLM Answer Generation - UPDATED to return structured data
    */
   private async generateLLMAnswer(
     enhancedQuery: EnhancedQuery,
     structuredData: SearchResult[],
     originalQuery: string
-  ): Promise<LLMResponse> {
+  ): Promise<{ llmResponse: LLMResponse; aiStructuredData: SearchResult[] }> {
     if (!this.llmModel) {
-      console.error("❌ Gemini LLM model not initialized");
+      console.error("❌ Gemini LLM model not initialized - providing fallback response");
+      
+      // Create a basic fallback response based on the data
+      const metrics = structuredData.map(item => item.metric).filter((value, index, self) => self.indexOf(value) === index);
+      const sheets = structuredData.map(item => item.sheetName).filter((value, index, self) => self.indexOf(value) === index);
+      
+      const fallbackAnswer = `I found ${structuredData.length} data points across ${sheets.length} sheets. The data includes metrics like: ${metrics.slice(0, 5).join(', ')}. However, I'm unable to provide a detailed analysis as the AI model is not available. Please check the configuration or try again later.`;
+      
       return {
-        answer: "LLM model not available. Please check configuration.",
-        confidence: 0.1,
-        reasoning: "Gemini LLM model not initialized",
-        dataPoints: structuredData.length,
-        sources: [],
-        generatedTable: ""
+        llmResponse: {
+          answer: fallbackAnswer,
+          confidence: 0.2,
+          reasoning: "LLM model not initialized - providing basic data summary",
+          dataPoints: structuredData.length,
+          sources: ["Data summary from available structured data"],
+          generatedTable: ""
+        },
+        aiStructuredData: []
       };
     }
 
-    console.log("🔍 Gemini LLM Model Status:", {
-      hasModel: !!this.llmModel,
-      modelType: typeof this.llmModel,
-      hasGenerateContent: !!(this.llmModel as any).generateContent
-    });
 
-    console.log("🤖 Stage 3: Generating Gemini LLM answer");
 
     const contextData = this.prepareLLMContext(structuredData);
     const prompt = this.buildLLMPrompt(enhancedQuery, contextData, originalQuery);
 
+
     try {
+      if (!this.llmModel) {
+        throw new Error("LLM model not initialized");
+      }
+
       const result = await this.llmModel.generateContent(prompt);
-      console.log("🔍 Gemini LLM response:", result.response.text());
-      const text = result.response.text() || 'No response generated';
+      
+      if (!result || !result.response) {
+        throw new Error("No response from Gemini API");
+      }
+
+      const text = result.response.text();
+
+      if (!text || text.trim().length === 0) {
+        throw new Error("Empty response from Gemini API");
+      }
 
       console.log("✅ Gemini LLM response generated successfully");
 
       const parsedResponse = this.parseLLMResponse(text, structuredData.length);
-      return parsedResponse.llmResponse;
+      return {
+        llmResponse: parsedResponse.llmResponse,
+        aiStructuredData: parsedResponse.aiStructuredData
+      };
     } catch (error) {
       console.error("❌ Gemini LLM generation failed:", error);
       console.error("Error details:", JSON.stringify(error, null, 2));
+      
+      // Provide a more helpful fallback response
+      const fallbackAnswer = `Based on the available data (${structuredData.length} data points), I can see information about ${structuredData.map(item => item.metric).filter((value, index, self) => self.indexOf(value) === index).slice(0, 5).join(', ')}. However, I'm unable to generate a complete analysis at the moment due to a technical issue. Please try rephrasing your question or contact support if the issue persists.`;
+      
       return {
-        answer: "I'm unable to generate a complete answer at the moment. Please try rephrasing your question.",
-        confidence: 0.3,
-        reasoning: `Gemini LLM generation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        dataPoints: structuredData.length,
-        sources: [],
-        generatedTable: ""
+        llmResponse: {
+          answer: fallbackAnswer,
+          confidence: 0.3,
+          reasoning: `Gemini LLM generation failed: ${error instanceof Error ? error.message : 'Unknown error'}. This could be due to API limits, network issues, or model availability.`,
+          dataPoints: structuredData.length,
+          sources: [`Technical Error: ${error instanceof Error ? error.message : 'Unknown error'}`],
+          generatedTable: ""
+        },
+        aiStructuredData: []
       };
     }
   }
@@ -636,7 +821,6 @@ export class EnhancedSearch {
       };
     }
 
-    console.log("🧠 Preparing LLM context with data:", data.length, "items");
     
     const groupedData: Map<string, {
       workbookId: string;
@@ -654,7 +838,7 @@ export class EnhancedSearch {
     }[]> = new Map();
     
     data.forEach((item) => {
-      const key = `${item.sheetName}_${item.metric}`;
+      const key = `${item.sheetName}`;
       
       const groupedItem: {
         workbookId: string;
@@ -695,17 +879,18 @@ export class EnhancedSearch {
 
     const contextData = {
       totalDataPoints: data.length,
-      groupedData: groupedData.values()
+      groupedData: Array.from(groupedData.entries()).map(([key, items]) => ({
+        metric: key,
+        items: items
+      }))
     };
 
     const context = JSON.stringify(contextData, null, 2);
-
-    console.log("✅ LLM context prepared with", groupedData.size, "grouped data points");
     return { context };
   }
 
   /**
-   * Build LLM prompt with context and instructions
+   * Build LLM prompt with context and instructions - UPDATED to generate structured data
    */
   private buildLLMPrompt(enhancedQuery: EnhancedQuery, contextData: any, originalQuery: string): string {
     return `You are a financial data analyst assistant. You have access to structured financial data and need to provide accurate, insightful answers based on the available data.
@@ -731,11 +916,12 @@ INSTRUCTIONS:
 
 4. Provide your insights to the user
 
-5. IMPORTANT: Create a dynamic table structure that best represents your analysis:
-   - Have appropriate headers based on the data you're presenting
-   - Include relevant rows with actual data from the context
-   - Use proper HTML table structure with <table>, <thead>, <tbody>, <tr>, <th>, <td> tags
-   - Be structured to clearly present the key findings from your analysis
+5. CRITICAL: Generate comprehensive structured data that matches the following JSON format for each analysis result:
+   - Create MULTIPLE data points for different aspects of your analysis
+   - Include calculations, comparisons, insights, trends, and key findings as separate structured data points
+   - Use VARIED and MEANINGFUL metric names to create different categories
+   - Generate at least 3-5 different data points for comprehensive analysis
+   - Use the exact field names and structure provided below
 
 6. Format your response as follows:
    ANSWER: [Your detailed answer here]
@@ -743,37 +929,186 @@ INSTRUCTIONS:
    REASONING: [Your reasoning process]
    KEY_INSIGHTS: [Key insights from the analysis]
    
-   [Your dynamic table here using proper HTML table tags]`;
+   STRUCTURED_DATA: [JSON array of structured data points matching this exact format:
+   [
+     {
+       "_id": "ai_generated_1",
+       "tenantId": "ai_analysis",
+       "workbookId": "ai_analysis",
+       "sheetId": "ai_analysis",
+       "sheetName": "AI Analysis Results",
+       "rowName": "[Row identifier - could be metric name, category, etc.]",
+       "colName": "[Column identifier - could be value type, period, etc.]",
+       "rowIndex": 1,
+       "colIndex": 1,
+       "cellAddress": "A1",
+       "dataType": "[number|string|date|percent|ratio]",
+       "unit": "[INR|percentage|ratio|count|etc.]",
+       "features": {
+         "isPercentage": false,
+         "isMargin": false,
+         "isGrowth": false,
+         "isAggregation": false,
+         "isForecast": false,
+         "isUniqueIdentifier": false
+       },
+       "sourceCell": "AI_Generated",
+       "sourceFormula": null,
+       "metric": "[Metric name]",
+       "value": "[Actual value - number, string, or date]",
+       "year": [year if applicable],
+       "month": "[month if applicable]",
+       "quarter": "[quarter if applicable]",
+       "dimensions": {}
+     }
+   ]
+   ]
+
+IMPORTANT NOTES:
+- For calculations: Create separate data points for each calculation step and final result
+- For comparisons: Create data points for each item being compared
+- For trends: Create data points for each time period
+- For insights: Create data points that represent key findings
+- Use VARIED metric names like: "Revenue Analysis", "Cost Breakdown", "Profit Margins", "Growth Trends", "Performance Metrics", "Key Insights", "Comparative Analysis", "Financial Ratios", "Market Analysis", "Risk Assessment"
+- Use appropriate dataType: "number" for calculations, "string" for text insights, "percent" for percentages
+- Ensure all numeric values are actual numbers, not strings
+- Include meaningful rowName and colName that describe what each data point represents
+- Create at least 3-5 different categories to show comprehensive analysis
+
+EXAMPLE STRUCTURED DATA:
+[
+  {
+    "_id": "ai_generated_1",
+    "metric": "Revenue Analysis",
+    "rowName": "Total Revenue",
+    "colName": "Current Period",
+    "value": 1500000,
+    "dataType": "number"
+  },
+  {
+    "_id": "ai_generated_2", 
+    "metric": "Profit Margins",
+    "rowName": "Gross Margin",
+    "colName": "Percentage",
+    "value": 0.25,
+    "dataType": "percent"
+  },
+  {
+    "_id": "ai_generated_3",
+    "metric": "Key Insights",
+    "rowName": "Top Finding",
+    "colName": "Description",
+    "value": "Revenue increased by 15% compared to last quarter",
+    "dataType": "string"
+  }
+]`;
   }
 
   /**
-   * Parse LLM response and extract structured data
+   * Parse LLM response and extract structured data - UPDATED to parse structured data
    */
-  private parseLLMResponse(response: string, dataPointCount: number): { llmResponse: LLMResponse; generatedTable: string } {
+  private parseLLMResponse(response: string, dataPointCount: number): { 
+    llmResponse: LLMResponse; 
+    generatedTable: string;
+    aiStructuredData: SearchResult[];
+  } {
     try {
-      const answerMatch = response.match(/ANSWER:\s*(.+?)(?=\n|$)/i);
-      const confidenceMatch = response.match(/CONFIDENCE:\s*(.+?)(?=\n|$)/i);
-      const reasoningMatch = response.match(/REASONING:\s*(.+?)(?=\n|$)/i);
-      const insightsMatch = response.match(/KEY_INSIGHTS:\s*(.+?)(?=\n|$)/i);
+      
+      // Improved regex patterns to capture multi-line responses
+      const answerMatch = response.match(/ANSWER:\s*([\s\S]*?)(?=\n\s*(?:CONFIDENCE|REASONING|KEY_INSIGHTS|STRUCTURED_DATA)|$)/i);
+      const confidenceMatch = response.match(/CONFIDENCE:\s*([\s\S]*?)(?=\n\s*(?:ANSWER|REASONING|KEY_INSIGHTS|STRUCTURED_DATA)|$)/i);
+      const reasoningMatch = response.match(/REASONING:\s*([\s\S]*?)(?=\n\s*(?:ANSWER|CONFIDENCE|KEY_INSIGHTS|STRUCTURED_DATA)|$)/i);
+      const insightsMatch = response.match(/KEY_INSIGHTS:\s*([\s\S]*?)(?=\n\s*(?:ANSWER|CONFIDENCE|REASONING|STRUCTURED_DATA)|$)/i);
+      
 
       const confidence = confidenceMatch ? 
         (confidenceMatch[1].toLowerCase().includes('high') ? 0.9 :
          confidenceMatch[1].toLowerCase().includes('medium') ? 0.6 : 0.3) : 0.5;
 
+      // Extract structured data from LLM response
+      const structuredDataMatch = response.match(/STRUCTURED_DATA:\s*(\[[\s\S]*?\])/i);
+      let aiStructuredData: SearchResult[] = [];
+      
+      if (structuredDataMatch) {
+        try {
+          const structuredDataJson = structuredDataMatch[1];
+          
+          const parsedData = JSON.parse(structuredDataJson);
+          if (Array.isArray(parsedData)) {
+            aiStructuredData = parsedData.map((item, index) => ({
+              _id: item._id || `ai_generated_${index + 1}`,
+              tenantId: item.tenantId || "ai_analysis",
+              workbookId: item.workbookId || "ai_analysis",
+              sheetId: item.sheetId || "ai_analysis",
+              sheetName: item.sheetName || "AI Analysis Results",
+              rowName: item.rowName || "AI Result",
+              colName: item.colName || "Value",
+              rowIndex: item.rowIndex || index + 1,
+              colIndex: item.colIndex || 1,
+              cellAddress: item.cellAddress || `A${index + 1}`,
+              dataType: item.dataType || "string",
+              unit: item.unit || "N/A",
+              features: {
+                isPercentage: item.features?.isPercentage || false,
+                isMargin: item.features?.isMargin || false,
+                isGrowth: item.features?.isGrowth || false,
+                isAggregation: item.features?.isAggregation || false,
+                isForecast: item.features?.isForecast || false,
+                isUniqueIdentifier: item.features?.isUniqueIdentifier || false
+              },
+              sourceCell: item.sourceCell || "AI_Generated",
+              sourceFormula: item.sourceFormula || null,
+              metric: item.metric || "AI Analysis",
+              value: item.value,
+              year: item.year,
+              month: item.month,
+              quarter: item.quarter,
+              dimensions: item.dimensions || {}
+            }));
+            console.log("✅ Parsed AI structured data:", aiStructuredData.length, "items");
+          }
+        } catch (parseError) {
+          console.error("❌ Failed to parse structured data from LLM:", parseError);
+          aiStructuredData = [];
+        }
+      }
+
+      // Fallback to HTML table if no structured data
       const tableMatch = response.match(/(<table[^>]*>[\s\S]*?<\/table>)/i);
       const generatedTable = tableMatch ? tableMatch[1] : '';
 
+      // Parse insights properly - split by lines and filter out empty ones
+      let insights: string[] = [];
+      if (insightsMatch) {
+        insights = insightsMatch[1]
+          .split('\n')
+          .map(line => line.trim())
+          .filter(line => line.length > 0)
+          .map(line => line.replace(/^[-•*]\s*/, '')); // Remove bullet points
+      }
+
+      // Fallback: if no structured parsing worked, use the full response as answer
+      const finalAnswer = answerMatch ? answerMatch[1].trim() : response.trim();
+      const finalReasoning = reasoningMatch ? reasoningMatch[1].trim() : "Analysis based on available data";
+      
+      console.log("✅ Final parsed response:");
+      console.log("  Answer length:", finalAnswer.length);
+      console.log("  Reasoning length:", finalReasoning.length);
+      console.log("  Insights count:", insights.length);
+      console.log("  Structured data count:", aiStructuredData.length);
+
       const llmResponse: LLMResponse = {
-        answer: answerMatch ? answerMatch[1].trim() : response.trim(),
+        answer: finalAnswer,
         confidence,
-        reasoning: reasoningMatch ? reasoningMatch[1].trim() : "Analysis based on available data",
-        dataPoints: dataPointCount,
-        sources: insightsMatch ? [insightsMatch[1].trim()] : [],
+        reasoning: finalReasoning,
+        dataPoints: dataPointCount + aiStructuredData.length,
+        sources: insights.length > 0 ? insights : [],
         generatedTable: generatedTable
       };
 
-      return { llmResponse, generatedTable };
+      return { llmResponse, generatedTable, aiStructuredData };
     } catch (error) {
+      console.error("❌ Error parsing LLM response:", error);
       const llmResponse: LLMResponse = {
         answer: response.trim(),
         confidence: 0.5,
@@ -782,7 +1117,7 @@ INSTRUCTIONS:
         sources: [],
         generatedTable: ''
       };
-      return { llmResponse, generatedTable: '' };
+      return { llmResponse, generatedTable: '', aiStructuredData: [] };
     }
   }
 
@@ -818,20 +1153,22 @@ INSTRUCTIONS:
       throw new Error("Database not connected. Call connect() first.");
     }
 
-    console.log("🚀 Starting enhanced semantic search pipeline (No Query Normalization)");
+    console.log("🚀 Starting enhanced semantic search pipeline (Semantic Dictionary Normalization)");
     console.log(`🔍 Original Query: "${query}"`);
 
     const startTime = Date.now();
 
-    // 1️⃣ Query Processing (No Normalization - Original Query Preserved)
+    // 1️⃣ Query Processing (Semantic Dictionary Normalization)
     const queryEnhancementStart = Date.now();
+    
+    
     const enhancedQuery = await this.enhanceQueryNormalization(query);
     const queryEnhancementTime = Date.now() - queryEnhancementStart;
 
     // 2️⃣ Stage 1: Vector Search with proper filtering
     const vectorStartTime = Date.now();
     const vectorResults = await this.performVectorSearch(
-      enhancedQuery.originalQuery,
+      enhancedQuery.normalizedQuery,
       workbookId,
       tenantId,
       topK
@@ -847,30 +1184,34 @@ INSTRUCTIONS:
     );
     const structuredDataTime = Date.now() - structuredStartTime;
 
-    // 4️⃣ Stage 3: LLM Answer Generation
+    // 4️⃣ Stage 3: LLM Answer Generation with Structured Data
     const llmStartTime = Date.now();
-    const llmResponse = await this.generateLLMAnswer(
+    const llmResult = await this.generateLLMAnswer(
       enhancedQuery,
       vectorResults,
       query
     );
     const llmGenerationTime = Date.now() - llmStartTime;
 
+    // Merge original structured data with AI-generated structured data
+    const combinedStructuredData = [...structuredData, ...llmResult.aiStructuredData];
+    
     // Extract the generated table from the LLM response
-    const generatedTable = llmResponse.generatedTable || '';
+    const generatedTable = llmResult.llmResponse.generatedTable || '';
 
     const totalTime = Date.now() - startTime;
 
-    console.log("✅ Improved enhanced search pipeline completed");
+    console.log("✅ Enhanced search pipeline completed with AI structured data");
     console.log(`⏱️  Total time: ${totalTime}ms`);
-    console.log(`📊 Results: ${structuredData.length} data points, ${vectorResults.length} vector matches`);
+    console.log(`📊 Results: ${structuredData.length} original + ${llmResult.aiStructuredData.length} AI-generated = ${combinedStructuredData.length} total data points`);
+    console.log(`🔍 Vector matches: ${vectorResults.length}`);
 
     return {
       query,
       enhancedQuery,
       vectorResults,
-      structuredData,
-      llmResponse,
+      structuredData: combinedStructuredData, // Return combined data
+      llmResponse: llmResult.llmResponse,
       generatedTable,
       searchMetadata: {
         queryEnhancementTime,
@@ -901,32 +1242,15 @@ INSTRUCTIONS:
       throw new Error("Database not connected. Call connect() first.");
     }
 
-    console.log("🔍 Exploring database content...");
     
     try {
       const totalDocs = await this.dbConfig.collection.countDocuments();
-      console.log(`📊 Total documents in collection: ${totalDocs}`);
-
       if (totalDocs > 0) {
         const sampleDocs = await this.dbConfig.collection.find().limit(3).toArray();
-        console.log("📋 Sample documents:");
-        sampleDocs.forEach((doc, index) => {
-          console.log(`  Doc ${index + 1}:`, {
-            tenantId: doc.tenantId,
-            workbookId: doc.workbookId,
-            metric: doc.metric,
-            year: doc.year,
-            month: doc.month,
-            quarter: doc.quarter,
-            sheetName: doc.sheetName,
-            hasEmbedding: !!doc.embedding
-          });
-        });
       }
 
       return { totalDocs, hasData: totalDocs > 0 };
     } catch (error) {
-      console.error("❌ Error exploring database:", error);
       throw error;
     }
   }
@@ -1027,6 +1351,7 @@ INSTRUCTIONS:
       throw error;
     }
   }
+
 }
 
   
