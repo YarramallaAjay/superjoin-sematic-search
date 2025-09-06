@@ -42,8 +42,10 @@ export interface LLMResponse {
   answer: string;
   confidence: number;
   reasoning: string;
+  keyInsights?: string;
   dataPoints: number;
   sources: string[];
+  generatedTable?: string;
 }
 
 export interface SearchResponse {
@@ -124,6 +126,7 @@ export class ApiService {
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
+      console.log(response)
 
       return await response.json();
     } catch (error) {

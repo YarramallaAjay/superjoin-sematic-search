@@ -56,7 +56,7 @@ The Gemini configuration is managed in `config/llm-config.ts`:
 export const llmConfig: LLMConfig = {
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || 'default_key',
-    model: 'gemini-1.5-flash',        // Model to use
+    model: 'gemini-2.5-flash',        // Model to use
     temperature: 0.3,                  // Creativity level (0.0 = focused, 1.0 = creative)
     maxTokens: 1000                    // Maximum response length
   }

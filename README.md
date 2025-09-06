@@ -248,13 +248,13 @@ interface LLMResponse {
 - npm or yarn
 
 ### **Installation**
-```bash
+   ```bash
 # Clone the repository
-git clone <repository-url>
-cd superjoin-semantic-search
+   git clone <repository-url>
+   cd superjoin-semantic-search
 
 # Install dependencies
-npm install
+   npm install
 
 # Set up environment variables
 cp .env.example .env.local
@@ -262,19 +262,19 @@ cp .env.example .env.local
 ```
 
 ### **Environment Variables**
-```env
+   ```env
 MONGO_DB_URL=mongodb+srv://username:password@cluster.mongodb.net/database
 GEMINI_API_KEY=your_gemini_api_key_here
-```
+   ```
 
 ### **Development**
-```bash
+   ```bash
 # Start development server
 npm run dev
 
-# Start UI only
-npm run dev:ui
-
+   # Start UI only
+   npm run dev:ui
+   
 # Build for production
 npm run build
 ```

@@ -38,12 +38,16 @@ interface SearchResult {
   month?: string;
   quarter?: string;
   dimensions: Record<string, any>;
+  semanticString: string;
+  relevanceScore?: number;
+  isHighConfidence?: boolean;
 }
 
 interface LLMResponse {
   answer: string;
   confidence: number;
   reasoning: string;
+  keyInsights?: string;
   dataPoints: number;
   sources: string[];
   generatedTable: string;
@@ -54,7 +58,12 @@ interface EnhancedQuery {
   normalizedQuery: string;
   dimensions: string[];
   timeFilters: { year?: number; month?: string; quarter?: string; period?: string };
-  businessContext: string;
+  businessContext: {
+    metrics: string[];
+    dimensions: string[];
+    businessTerms: string[];
+    intent: string;
+  };
 }
 
 export class EnhancedSearch {
@@ -144,20 +153,123 @@ export class EnhancedSearch {
   }
 
   /**
-   * Semantic dictionary-based query normalization
+   * Enhanced query normalization with LLM-based metric and dimension extraction
    */
   private async enhanceQueryNormalization(query: string): Promise<EnhancedQuery> {
     const semanticDictionary = this.getSemanticDictionary();
     const normalizedQuery = this.normalizeQueryWithSemantics(query, semanticDictionary);
+    
+    // Extract business context using LLM for better accuracy
+    const businessContext = await this.extractBusinessContextWithLLM(query);
+    
     const dimensions = this.extractDimensions(normalizedQuery);
     const timeFilters = this.extractTimeFilters(normalizedQuery);
-    const businessContext = this.generateBusinessContext(query, normalizedQuery, semanticDictionary);
+
     return {
       originalQuery: query,
       normalizedQuery,
       dimensions,
       timeFilters,
       businessContext
+    };
+  }
+
+  /**
+   * Extract business context using LLM for better metric and dimension identification
+   */
+  private async extractBusinessContextWithLLM(query: string): Promise<{
+    metrics: string[];
+    dimensions: string[];
+    businessTerms: string[];
+    intent: string;
+  }> {
+    if (!this.llmModel) {
+      // Fallback to basic extraction if LLM is not available
+      return this.extractBusinessContextFallback(query);
+    }
+
+    try {
+      const prompt = `Analyze this query and extract key information for data filtering(infer from query only):
+
+Query: "${query}"
+
+Please extract and return a JSON object with the following structure:
+{
+  "metrics": ["list of measurement/metric terms mentioned (e.g., revenue, sales, units, profit, cost, growth)"],
+  "dimensions": ["list of categorization/grouping terms mentioned (e.g., region, product, customer, time, category)"],
+  "businessTerms": ["list of specific values, names, or identifiers mentioned (e.g., APAC, hardware, Q1, 2023, company names)"],
+  "intent": "brief description of what the user wants to find or calculate"
+}
+
+Guidelines:
+- Extract terms that would help filter data in a database
+- Include both general business terms and specific values
+- Don't make assumptions about business domains - work with any industry
+- Focus on terms that would appear in column names, row names, or data values
+
+Examples:
+- "calculate the hardware units sold in APAC region" → {"metrics": ["units", "sold"], "dimensions": ["region"], "businessTerms": ["hardware", "APAC"], "intent": "calculate units sold for hardware products in APAC region"}
+- "show me revenue growth for Q1 2023" → {"metrics": ["revenue", "growth"], "dimensions": ["time"], "businessTerms": ["Q1", "2023"], "intent": "show revenue growth for Q1 2023"}
+- "find customer satisfaction scores by department" → {"metrics": ["satisfaction", "scores"], "dimensions": ["department"], "businessTerms": ["customer"], "intent": "find customer satisfaction scores by department"}
+
+Return only the JSON object, no additional text.`;
+
+      const result = await this.llmModel.generateContent(prompt);
+      const response = result.response.text();
+      
+      // Parse the JSON response
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsedContext = JSON.parse(jsonMatch[0]);
+        console.log("✅ LLM extracted business context:", parsedContext);
+        return parsedContext;
+      } else {
+        throw new Error("No valid JSON found in LLM response");
+      }
+    } catch (error) {
+      console.error("❌ LLM business context extraction failed:", error);
+      return this.extractBusinessContextFallback(query);
+    }
+  }
+
+  /**
+   * Simple fallback business context extraction when LLM is not available
+   * This is a minimal fallback that doesn't make domain-specific assumptions
+   */
+  private extractBusinessContextFallback(query: string): {
+    metrics: string[];
+    dimensions: string[];
+    businessTerms: string[];
+    intent: string;
+  } {
+    // Extract basic patterns without making business domain assumptions
+    const businessTerms = [];
+    
+    // Extract capitalized words and acronyms (likely business terms)
+    const capitalizedTerms = query.match(/\b[A-Z]{2,}\b|\b[A-Z][a-z]+\b/gi) || [];
+    businessTerms.push(...capitalizedTerms.map(term => term.toLowerCase()));
+    
+    // Extract years
+    const years = query.match(/\b(19|20)\d{2}\b/g) || [];
+    businessTerms.push(...years);
+    
+    // Extract quarters
+    const quarters = query.match(/\bQ[1-4]\b/gi) || [];
+    businessTerms.push(...quarters.map(q => q.toLowerCase()));
+    
+    // Extract months
+    const months = query.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december)\b/gi) || [];
+    businessTerms.push(...months.map(m => m.toLowerCase()));
+    
+    // Remove duplicates
+    const uniqueBusinessTerms = [...new Set(businessTerms)];
+    
+    // Return minimal context - let the vector search handle the semantic matching
+    return {
+      metrics: [], // No assumptions about metrics
+      dimensions: [], // No assumptions about dimensions
+      businessTerms: uniqueBusinessTerms,
+      intent: `Search for data related to: ${uniqueBusinessTerms.join(', ') || 'the query terms'}`
     };
   }
 
@@ -519,53 +631,235 @@ export class EnhancedSearch {
   }
 
   /**
-   * Stage 1: Vector Search with proper filtering
+   * Build multi-stage search pipeline to get best candidates first, then expand to neighbors
    */
-  private async performVectorSearch(
-    normalizedQuery: string,
+  private async buildMultiStageSearchPipeline(
+    embedding: number[],
     workbookId: string,
     tenantId: string,
-    topK: number = 1000
+    businessContext: any,
+    topK: number
   ): Promise<SearchResult[]> {
-    if (!this.dbConfig) {
-      throw new Error("Database not connected. Call connect() first.");
+    console.log("🔍 Starting multi-stage search for best candidates...");
+
+    // Stage 1: Get high-confidence candidates (strict filtering)
+    const highConfidenceResults = await this.getHighConfidenceCandidates(
+      embedding, workbookId, tenantId, businessContext, Math.min(topK, 200)
+    );
+
+    console.log(`✅ High confidence candidates: ${highConfidenceResults.length}`);
+
+    // Stage 2: If we have enough high-confidence results, return them
+    if (highConfidenceResults.length >= topK * 0.7) {
+      console.log("🎯 Sufficient high-confidence results found, returning top candidates");
+      return highConfidenceResults.slice(0, topK);
     }
 
-    console.log("🔍 Stage 1: Performing vector search with proper filtering");
-    console.log(`📝 Normalized query: "${normalizedQuery}"`);
-    console.log(`📚 Workbook: ${workbookId}, Tenant: ${tenantId}`);
+    // Stage 3: Expand search to include more candidates (relaxed filtering)
+    const expandedResults = await this.getExpandedCandidates(
+      embedding, workbookId, tenantId, businessContext, topK * 2
+    );
 
-    const queryEmbeddingRequest = [{
-      cellId: 'query',
-      semanticString: normalizedQuery
-    }];
-    const queryEmbeddings = await embeddingService.makeEmbeddingsOptimized(queryEmbeddingRequest);
-    const embedding = queryEmbeddings[0]?.embedding || new Array(768).fill(0);
+    console.log(`✅ Expanded candidates: ${expandedResults.length}`);
 
-    const pureVectorPipeline = [
-      {
+    // Stage 4: Combine and deduplicate results
+    const combinedResults = this.combineAndDeduplicateResults(highConfidenceResults, expandedResults);
+
+    // Stage 5: Sort by relevance and return top K
+    const finalResults = combinedResults
+      .sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0))
+      .slice(0, topK);
+
+    console.log(`🎯 Final results: ${finalResults.length} (${highConfidenceResults.length} high-confidence + ${expandedResults.length - highConfidenceResults.length} expanded)`);
+
+    return finalResults;
+  }
+
+  /**
+   * Get high-confidence candidates with strict business context filtering
+   */
+  private async getHighConfidenceCandidates(
+    embedding: number[],
+    workbookId: string,
+    tenantId: string,
+    businessContext: any,
+    limit: number
+  ): Promise<SearchResult[]> {
+    const pipeline: any[] = [];
+
+    // Stage 1: Vector Search with more candidates
+    pipeline.push({
         $vectorSearch: {
           index: "vector_index",
           path: "embedding",
           queryVector: embedding,
-          numCandidates: 1000,
-          limit: topK * 5
-        }
+        numCandidates: 2000,
+        limit: limit * 3
       }
-    ];
+    });
 
-    console.log("Pure Vector Search Pipeline:", JSON.stringify(pureVectorPipeline, null, 2));
+    // Stage 2: Basic filtering
+    pipeline.push({
+      $match: {
+        tenantId: tenantId,
+        workbookId: workbookId
+      }
+    });
 
-    let rawResults: any[] = [];
-    
-    try {
-      console.log("🔍 Attempting pure vector search...");
-      rawResults = await this.dbConfig.collection
-        .aggregate(pureVectorPipeline)
-        .toArray();
-      console.log(`✅ Pure vector search successful: ${rawResults.length} results`);
-      
-      const processedResults = rawResults.map((doc: any) => ({
+    // Stage 3: Strict business context filtering (only if we have meaningful context)
+    if (businessContext && businessContext.businessTerms?.length > 0) {
+      const allTerms = [
+        ...(businessContext.metrics || []),
+        ...(businessContext.dimensions || []),
+        ...(businessContext.businessTerms || [])
+      ];
+
+      if (allTerms.length > 0) {
+        const termsRegex = new RegExp(allTerms.join('|'), 'i');
+        const businessFilters = {
+          $or: [
+            { rowName: { $regex: termsRegex } },
+            { colName: { $regex: termsRegex } },
+            { metric: { $regex: termsRegex } },
+            { semanticString: { $regex: termsRegex } },
+            { rawValue: { $regex: termsRegex } }
+          ]
+        };
+
+        // Add dimension filtering
+        allTerms.forEach((term: string) => {
+          businessFilters.$or.push({ [`dimensions.${term}`]: { $exists: true } } as any);
+          businessFilters.$or.push({ [`dimensions.${term.toLowerCase()}`]: { $exists: true } } as any);
+        });
+
+        pipeline.push({ $match: businessFilters });
+        console.log("🎯 Applied strict business context filters for high-confidence candidates");
+      }
+    }
+
+    // Stage 4: Add relevance score and sort
+    pipeline.push({
+      $addFields: {
+        relevanceScore: { $meta: "vectorSearchScore" }
+      }
+    });
+
+    pipeline.push({
+      $sort: { relevanceScore: -1 }
+    });
+
+    pipeline.push({
+      $limit: limit
+    });
+
+    const rawResults = await this.dbConfig!.collection.aggregate(pipeline).toArray();
+    return this.processSearchResults(rawResults);
+  }
+
+  /**
+   * Get expanded candidates with relaxed filtering
+   */
+  private async getExpandedCandidates(
+    embedding: number[],
+    workbookId: string,
+    tenantId: string,
+    businessContext: any,
+    limit: number
+  ): Promise<SearchResult[]> {
+    const pipeline: any[] = [];
+
+    // Stage 1: Vector Search with even more candidates
+    pipeline.push({
+      $vectorSearch: {
+        index: "vector_index",
+        path: "embedding",
+        queryVector: embedding,
+        numCandidates: 3000,
+        limit: limit * 2
+      }
+    });
+
+    // Stage 2: Basic filtering only
+    pipeline.push({
+      $match: {
+        tenantId: tenantId,
+        workbookId: workbookId
+      }
+    });
+
+    // Stage 3: Light business context filtering (if available)
+    if (businessContext && businessContext.businessTerms?.length > 0) {
+      const allTerms = [
+        ...(businessContext.metrics || []),
+        ...(businessContext.dimensions || []),
+        ...(businessContext.businessTerms || [])
+      ];
+
+      if (allTerms.length > 0) {
+        // Use OR logic for more inclusive filtering
+        const termsRegex = new RegExp(allTerms.join('|'), 'i');
+        const lightFilters = {
+          $or: [
+            { rowName: { $regex: termsRegex } },
+            { colName: { $regex: termsRegex } },
+            { metric: { $regex: termsRegex } },
+            { semanticString: { $regex: termsRegex } }
+          ]
+        };
+
+        pipeline.push({ $match: lightFilters });
+        console.log("🎯 Applied light business context filters for expanded candidates");
+      }
+    }
+
+    // Stage 4: Add relevance score and sort
+    pipeline.push({
+      $addFields: {
+        relevanceScore: { $meta: "vectorSearchScore" }
+      }
+    });
+
+    pipeline.push({
+      $sort: { relevanceScore: -1 }
+    });
+
+    pipeline.push({
+      $limit: limit
+    });
+
+    const rawResults = await this.dbConfig!.collection.aggregate(pipeline).toArray();
+    return this.processSearchResults(rawResults);
+  }
+
+  /**
+   * Combine and deduplicate results from different stages
+   */
+  private combineAndDeduplicateResults(
+    highConfidenceResults: SearchResult[],
+    expandedResults: SearchResult[]
+  ): SearchResult[] {
+    const resultMap = new Map<string, SearchResult>();
+
+    // Add high-confidence results first (they get priority)
+    highConfidenceResults.forEach(result => {
+      resultMap.set(result._id, { ...result, isHighConfidence: true });
+    });
+
+    // Add expanded results (only if not already present)
+    expandedResults.forEach(result => {
+      if (!resultMap.has(result._id)) {
+        resultMap.set(result._id, { ...result, isHighConfidence: false });
+      }
+    });
+
+    return Array.from(resultMap.values());
+  }
+
+  /**
+   * Process raw search results into SearchResult format
+   */
+  private processSearchResults(rawResults: any[]): SearchResult[] {
+    return rawResults.map((doc: any) => ({
         _id: doc._id,
         tenantId: doc.tenantId,
         workbookId: doc.workbookId,
@@ -586,10 +880,53 @@ export class EnhancedSearch {
         year: doc.year,
         month: doc.month,
         quarter: doc.quarter,
-        dimensions: doc.dimensions || {}
-      })).filter((doc: any) => doc.workbookId === workbookId && doc.tenantId === tenantId);
+      dimensions: doc.dimensions || {},
+      semanticString: doc.semanticString || '',
+      relevanceScore: doc.relevanceScore || 0
+    }));
+  }
+
+  /**
+   * Stage 1: Enhanced Vector Search with business context filtering
+   */
+  private async performVectorSearch(
+    normalizedQuery:EnhancedQuery,
+    workbookId: string,
+    tenantId: string,
+    topK: number = 1000
+  ): Promise<SearchResult[]> {
+    if (!this.dbConfig) {
+      throw new Error("Database not connected. Call connect() first.");
+    }
+
+    console.log("🔍 Stage 1: Performing enhanced vector search with business context filtering");
+    console.log(`📝 Normalized query: "${normalizedQuery.normalizedQuery}"`);
+    console.log(`📚 Workbook: ${workbookId}, Tenant: ${tenantId}`);
+    console.log(`🎯 Business context:`, normalizedQuery.businessContext);
+
+    const queryEmbeddingRequest = [{
+      cellId: 'query',
+      semanticString: normalizedQuery.normalizedQuery
+    }];
+    const queryEmbeddings = await embeddingService.makeEmbeddingsOptimized(queryEmbeddingRequest);
+    const embedding = queryEmbeddings[0]?.embedding || new Array(768).fill(0);
+
+    // Use multi-stage search to get best candidates first, then expand
+    let rawResults: SearchResult[] = [];
+    
+    try {
+      console.log("🔍 Attempting multi-stage search for best candidates...");
+      rawResults = await this.buildMultiStageSearchPipeline(
+        embedding, 
+        workbookId, 
+        tenantId, 
+        normalizedQuery.businessContext, 
+        topK
+      );
+      console.log(`✅ Multi-stage search successful: ${rawResults.length} results`);
       
-      rawResults = processedResults;
+      // Results are already processed and filtered by the multi-stage pipeline
+      console.log(`✅ Returning ${rawResults.length} results with relevance scores`);
       
     } catch (vectorError: any) {
       console.log("⚠️  Pure vector search failed, trying alternative approach...");
@@ -600,8 +937,9 @@ export class EnhancedSearch {
         {
           $match: {
             tenantId: tenantId,
-            workbookId:workbookId
-          }
+            workbookId:workbookId,
+            
+          },
         },
         {
           $project: {
@@ -669,7 +1007,8 @@ export class EnhancedSearch {
           ...(filters.tenantId && { tenantId: filters.tenantId }),
           ...(filters.year && { year: filters.year }),
           ...(filters.month && { month: filters.month }),
-          ...(filters.quarter && { quarter: filters.quarter })
+          ...(filters.quarter && { quarter: filters.quarter }),
+          
         }
       },
       {
@@ -725,6 +1064,7 @@ export class EnhancedSearch {
       month: doc.month,
       quarter: doc.quarter,
       dimensions: doc.dimensions || {},
+      semanticString:doc.semanticString
     }));
 
     console.log(`✅ Retrieved ${results.length} semantic-based structured data points`);
@@ -738,7 +1078,7 @@ export class EnhancedSearch {
     enhancedQuery: EnhancedQuery,
     structuredData: SearchResult[],
     originalQuery: string
-  ): Promise<{ llmResponse: LLMResponse; aiStructuredData: SearchResult[] }> {
+  ): Promise<{ llmResponse: LLMResponse; aiStructuredData: SearchResult[]; fullDataForTable: SearchResult[] }> {
     if (!this.llmModel) {
       console.error("❌ Gemini LLM model not initialized - providing fallback response");
       
@@ -753,17 +1093,24 @@ export class EnhancedSearch {
           answer: fallbackAnswer,
           confidence: 0.2,
           reasoning: "LLM model not initialized - providing basic data summary",
-          dataPoints: structuredData.length,
+        dataPoints: structuredData.length,
           sources: ["Data summary from available structured data"],
-          generatedTable: ""
+        generatedTable: ""
         },
-        aiStructuredData: []
+        aiStructuredData: [],
+        fullDataForTable: structuredData
       };
     }
 
 
 
-    const contextData = this.prepareLLMContext(structuredData);
+    // Use optimized context preparation - send only relevant data to LLM
+    const { context: optimizedContext, fullDataForTable } = this.prepareOptimizedLLMContext(
+      structuredData, 
+      enhancedQuery.businessContext
+    );
+    
+    const contextData = { context: optimizedContext };
     const prompt = this.buildLLMPrompt(enhancedQuery, contextData, originalQuery);
 
 
@@ -790,7 +1137,8 @@ export class EnhancedSearch {
       const parsedResponse = this.parseLLMResponse(text, structuredData.length);
       return {
         llmResponse: parsedResponse.llmResponse,
-        aiStructuredData: parsedResponse.aiStructuredData
+        aiStructuredData: parsedResponse.aiStructuredData,
+        fullDataForTable: fullDataForTable // Include full data for table display
       };
     } catch (error) {
       console.error("❌ Gemini LLM generation failed:", error);
@@ -802,19 +1150,187 @@ export class EnhancedSearch {
       return {
         llmResponse: {
           answer: fallbackAnswer,
-          confidence: 0.3,
+        confidence: 0.3,
           reasoning: `Gemini LLM generation failed: ${error instanceof Error ? error.message : 'Unknown error'}. This could be due to API limits, network issues, or model availability.`,
-          dataPoints: structuredData.length,
+        dataPoints: structuredData.length,
           sources: [`Technical Error: ${error instanceof Error ? error.message : 'Unknown error'}`],
-          generatedTable: ""
+        generatedTable: ""
         },
-        aiStructuredData: []
+        aiStructuredData: [],
+        fullDataForTable: fullDataForTable // Include full data for table display
       };
     }
   }
 
   /**
-   * Prepare LLM context from structured data
+   * Prepare optimized LLM context with only the most relevant data
+   */
+  private prepareOptimizedLLMContext(data: SearchResult[], businessContext: any): { 
+    context: string; 
+    fullDataForTable: SearchResult[] 
+  } {
+    // Keep all data for table display
+    const fullDataForTable = [...data];
+    
+    if (!data || data.length === 0) {
+      return {
+        context: JSON.stringify({
+          totalDataPoints: 0,
+          availableMetrics: [],
+          availableSheets: [],
+          availableYears: [],
+          availableMonths: [],
+          sampleData: [],
+          message: "No structured data available for analysis."
+        }, null, 2),
+        fullDataForTable
+      };
+    }
+
+    // Filter and prioritize data for LLM based on business context
+    const prioritizedData = this.prioritizeDataForLLM(data, businessContext);
+    
+    // Create a summary context for LLM (much smaller)
+    const contextData = {
+      totalDataPoints: data.length,
+      availableMetrics: [...new Set(data.map(item => item.metric))],
+      availableSheets: [...new Set(data.map(item => item.sheetName))],
+      availableYears: [...new Set(data.map(item => item.year).filter(Boolean))],
+      availableMonths: [...new Set(data.map(item => item.month).filter(Boolean))],
+      sampleData: prioritizedData.slice(0, 20), // Only top 20 most relevant items
+      dataSummary: this.createDataSummary(prioritizedData)
+    };
+
+    const context = JSON.stringify(contextData, null, 2);
+    
+    return { context, fullDataForTable };
+  }
+
+  /**
+   * Prioritize data for LLM based on business context and relevance
+   */
+  private prioritizeDataForLLM(data: SearchResult[], businessContext: any): SearchResult[] {
+    if (!businessContext || !businessContext.businessTerms?.length) {
+      // If no business context, return top results by relevance score
+      return data
+        .sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0))
+        .slice(0, 50);
+    }
+
+    const allTerms = [
+      ...(businessContext.metrics || []),
+      ...(businessContext.dimensions || []),
+      ...(businessContext.businessTerms || [])
+    ];
+
+    // Score each item based on business context relevance
+    const scoredData = data.map(item => {
+      let relevanceScore = item.relevanceScore || 0;
+      let businessRelevanceScore = 0;
+
+      // Check how many business terms match this item
+      const itemText = [
+        item.rowName,
+        item.colName,
+        item.metric,
+        item.semanticString,
+        String(item.value)
+      ].join(' ').toLowerCase();
+
+      allTerms.forEach(term => {
+        if (itemText.includes(term.toLowerCase())) {
+          businessRelevanceScore += 1;
+        }
+      });
+
+      // Check dimensions
+      Object.keys(item.dimensions || {}).forEach(dimKey => {
+        if (allTerms.some(term => dimKey.toLowerCase().includes(term.toLowerCase()))) {
+          businessRelevanceScore += 0.5;
+        }
+      });
+
+      return {
+        ...item,
+        combinedScore: relevanceScore + (businessRelevanceScore * 0.3)
+      };
+    });
+
+    // Sort by combined score and return top items
+    return scoredData
+      .sort((a, b) => b.combinedScore - a.combinedScore)
+      .slice(0, 50);
+  }
+
+  /**
+   * Create a summary of the data for LLM context
+   */
+  private createDataSummary(data: SearchResult[]): any {
+    const summary = {
+      topMetrics: {} as Record<string, { count: number; totalValue: number }>,
+      timeRange: { minYear: null as number | null, maxYear: null as number | null },
+      valueRange: { min: null as number | null, max: null as number | null },
+      dataTypes: {} as Record<string, number>,
+      sheets: new Set<string>()
+    };
+
+    data.forEach(item => {
+      // Track top metrics
+      const metric = item.metric || 'Unknown';
+      if (!summary.topMetrics[metric]) {
+        summary.topMetrics[metric] = { count: 0, totalValue: 0 };
+      }
+      summary.topMetrics[metric].count++;
+      if (typeof item.value === 'number') {
+        summary.topMetrics[metric].totalValue += item.value;
+      }
+
+      // Track time range
+      if (item.year) {
+        if (!summary.timeRange.minYear || item.year < summary.timeRange.minYear) {
+          summary.timeRange.minYear = item.year;
+        }
+        if (!summary.timeRange.maxYear || item.year > summary.timeRange.maxYear) {
+          summary.timeRange.maxYear = item.year;
+        }
+      }
+
+      // Track value range
+      if (typeof item.value === 'number') {
+        if (summary.valueRange.min === null || item.value < summary.valueRange.min) {
+          summary.valueRange.min = item.value;
+        }
+        if (summary.valueRange.max === null || item.value > summary.valueRange.max) {
+          summary.valueRange.max = item.value;
+        }
+      }
+
+      // Track data types
+      const dataType = item.dataType || 'unknown';
+      summary.dataTypes[dataType] = (summary.dataTypes[dataType] || 0) + 1;
+
+      // Track sheets
+      summary.sheets.add(item.sheetName);
+    });
+
+    return {
+      topMetrics: Object.entries(summary.topMetrics)
+        .map(([metric, data]) => ({
+          metric,
+          count: data.count,
+          averageValue: data.count > 0 ? data.totalValue / data.count : 0
+        }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10),
+      timeRange: summary.timeRange,
+      valueRange: summary.valueRange,
+      dataTypes: summary.dataTypes,
+      sheetCount: summary.sheets.size
+    };
+  }
+
+  /**
+   * Prepare LLM context from structured data (legacy method - kept for compatibility)
    */
   private prepareLLMContext(data: SearchResult[]): { context: string } {
     if (!data || data.length === 0) {
@@ -849,7 +1365,7 @@ export class EnhancedSearch {
     
     data.forEach((item) => {
       // Group by metric (business term) instead of just sheet name
-      const key = item.metric || item.colName || 'Unknown Metric';
+      const key = item.semanticString
       
       const groupedItem: {
         workbookId: string;
@@ -877,9 +1393,9 @@ export class EnhancedSearch {
       };
       
       // Add time dimensions for all items, not just dates
-      if (item.year) groupedItem.year = String(item.year);
-      if (item.month) groupedItem.month = item.month;
-      if (item.quarter) groupedItem.quarter = item.quarter;
+        if (item.year) groupedItem.year = String(item.year);
+        if (item.month) groupedItem.month = item.month;
+        if (item.quarter) groupedItem.quarter = item.quarter;
       
       if (!groupedData.has(key)) {
         groupedData.set(key, []);
@@ -889,27 +1405,19 @@ export class EnhancedSearch {
 
     const contextData = {
       totalDataPoints: data.length,
-      availableMetrics: Array.from(groupedData.keys()),
+      availableMetrics:[...new Set(data.map(item=>item.semanticString))],
       availableSheets: [...new Set(data.map(item => item.sheetName))],
       availableYears: [...new Set(data.map(item => item.year).filter(Boolean))],
       availableMonths: [...new Set(data.map(item => item.month).filter(Boolean))],
       groupedData: Array.from(groupedData.entries()).map(([key, items]) => ({
         metric: key,
         itemCount: items.length,
-        sampleValues: items.slice(0, 5).map(item => ({
-          rowName: item.rowName,
-          value: item.value,
-          year: item.year,
-          month: item.month,
-          quarter: item.quarter,
-          dataType: item.dataType
-        })),
         allItems: items
       }))
     };
 
     const context = JSON.stringify(contextData, null, 2);
-    
+
     
     return { context };
   }
@@ -918,251 +1426,507 @@ export class EnhancedSearch {
    * Build LLM prompt with context and instructions - UPDATED to generate structured data
    */
   private buildLLMPrompt(enhancedQuery: EnhancedQuery, contextData: any, originalQuery: string): string {
-    return `You are a financial data analyst assistant. You have access to structured financial data and need to provide accurate, insightful answers based on the available data.
+    return `You are a data analyst. Analyze the query and provide insights based on the available data.
 
-ORIGINAL USER QUERY: "${originalQuery}"
+QUERY: "${originalQuery}"
 
-CONTEXT DATA:
+DATA SUMMARY:
 ${contextData.context}
 
 INSTRUCTIONS:
-1. Analyze the context data structure:
-   - totalDataPoints: Total number of data points available
-   - availableMetrics: List of business metrics (Revenue, Sales, etc.)
-   - availableSheets: List of Excel sheets
-   - availableYears: List of years in the data
-   - availableMonths: List of months in the data
-   - groupedData: Data grouped by metric with sample values and all items
+1. Focus on the sampleData and dataSummary provided
+2. Answer the query directly and specifically - don't just say data is available, provide the actual answer
+3. If exact data isn't available, suggest alternatives or explain what can be calculated
+4. Provide confidence level (0-1) based on data quality
+5. Generate a table if relevant data exists
+6. Be specific about what the data shows, not just that it exists
 
-2. Understand the query thoroughly and match it with available data:
-   - Check if the requested metrics exist in availableMetrics
-   - Check if the requested time periods exist in availableYears/availableMonths
-   - Use the groupedData to find relevant information
+RESPONSE FORMAT:
+{
+  "answer": "Direct, specific answer to the query with actual values/insights(explanatory)",
+  "confidence": 0.8,
+  "reasoning": "Brief analysis reasoning explaining how you arrived at the answer(bullets)",
+  "keyInsights": "Key insights and relevant suggestions from the data(could be brief if reasoning or answer is larger)",
+  "dataPoints": 150,
+  "sources": ["Sheet1", "Revenue", "2023"],
+  "generatedTable": "TABLE_START: | Column1 | Column2 | Column3 |\n| Value1 | Value2 | Value3 | TABLE_END"
+}
 
-3. If the exact data is not available:
-   - Clearly state what data is NOT available
-   - List what data IS available (metrics, years, months)
-   - Provide analysis based on the available data
-   - Suggest alternative queries that can be answered with the available data
-
-4. Based on the query type, provide appropriate analysis:
-   - If the result is to list out, list the results according to the context data
-   - If the result is to calculate, calculate the result according to the context data
-   - If the result is to show, show the result according to the context data
-   - If the result is to compare, compare the results according to the context data
-   - If the result is to analyze, analyze the results according to the context data
-   - If the result is to summarize, summarize the results according to the context data
-   - If the result is to predict, predict the results according to the context data
-   - If the result is to trend, trend the results according to the context data
-   - If the result is to forecast, forecast the results according to the context data
-
-4. Provide your insights to the user
-
-5. CRITICAL: Generate comprehensive structured data that matches the following JSON format for each analysis result:
-   - Create MULTIPLE data points for different aspects of your analysis
-   - Include calculations, comparisons, insights, trends, and key findings as separate structured data points
-   - Use VARIED and MEANINGFUL metric names to create different categories
-   - Generate at least 3-5 different data points for comprehensive analysis
-   - Use the exact field names and structure provided below
-
-6. Format your response as follows:
-   ANSWER: [Your detailed answer here]
-   CONFIDENCE: [High/Medium/Low]
-   REASONING: [Your reasoning process]
-   KEY_INSIGHTS: [Key insights from the analysis]
-   
-   STRUCTURED_DATA: [JSON array of structured data points matching this exact format:
-   [
-     {
-       "_id": "ai_generated_1",
-       "tenantId": "ai_analysis",
-       "workbookId": "ai_analysis",
-       "sheetId": "ai_analysis",
-       "sheetName": "AI Analysis Results",
-       "rowName": "[Row identifier - could be metric name, category, etc.]",
-       "colName": "[Column identifier - could be value type, period, etc.]",
-       "rowIndex": 1,
-       "colIndex": 1,
-       "cellAddress": "A1",
-       "dataType": "[number|string|date|percent|ratio]",
-       "unit": "[INR|percentage|ratio|count|etc.]",
-       "features": {
-         "isPercentage": false,
-         "isMargin": false,
-         "isGrowth": false,
-         "isAggregation": false,
-         "isForecast": false,
-         "isUniqueIdentifier": false
-       },
-       "sourceCell": "AI_Generated",
-       "sourceFormula": null,
-       "metric": "[Metric name]",
-       "value": "[Actual value - number, string, or date]",
-       "year": [year if applicable],
-       "month": "[month if applicable]",
-       "quarter": "[quarter if applicable]",
-       "dimensions": {}
-     }
-   ]
-   ]
-
-IMPORTANT NOTES:
-- For calculations: Create separate data points for each calculation step and final result
-- For comparisons: Create data points for each item being compared
-- For trends: Create data points for each time period
-- For insights: Create data points that represent key findings
-- Use VARIED metric names like: "Revenue Analysis", "Cost Breakdown", "Profit Margins", "Growth Trends", "Performance Metrics", "Key Insights", "Comparative Analysis", "Financial Ratios", "Market Analysis", "Risk Assessment"
-- Use appropriate dataType: "number" for calculations, "string" for text insights, "percent" for percentages
-- Ensure all numeric values are actual numbers, not strings
-- Include meaningful rowName and colName that describe what each data point represents
-- Create at least 3-5 different categories to show comprehensive analysis
-
-EXAMPLE STRUCTURED DATA:
-[
-  {
-    "_id": "ai_generated_1",
-    "metric": "Revenue Analysis",
-    "rowName": "Total Revenue",
-    "colName": "Current Period",
-    "value": 1500000,
-    "dataType": "number"
-  },
-  {
-    "_id": "ai_generated_2", 
-    "metric": "Profit Margins",
-    "rowName": "Gross Margin",
-    "colName": "Percentage",
-    "value": 0.25,
-    "dataType": "percent"
-  },
-  {
-    "_id": "ai_generated_3",
-    "metric": "Key Insights",
-    "rowName": "Top Finding",
-    "colName": "Description",
-    "value": "Revenue increased by 15% compared to last quarter",
-    "dataType": "string"
-  }
-]`;
+IMPORTANT: 
+- Provide specific answers with actual data, not just "data is available"
+- If calculating something, show the calculation and the formulaes used and other useful insights or result
+- Be direct and actionable in your response`;
   }
 
   /**
    * Parse LLM response and extract structured data - UPDATED to parse structured data
    */
-  private parseLLMResponse(response: string, dataPointCount: number): { 
-    llmResponse: LLMResponse; 
-    generatedTable: string;
-    aiStructuredData: SearchResult[];
-  } {
-    try {
-      
-      // Improved regex patterns to capture multi-line responses
-      const answerMatch = response.match(/ANSWER:\s*([\s\S]*?)(?=\n\s*(?:CONFIDENCE|REASONING|KEY_INSIGHTS|STRUCTURED_DATA)|$)/i);
-      const confidenceMatch = response.match(/CONFIDENCE:\s*([\s\S]*?)(?=\n\s*(?:ANSWER|REASONING|KEY_INSIGHTS|STRUCTURED_DATA)|$)/i);
-      const reasoningMatch = response.match(/REASONING:\s*([\s\S]*?)(?=\n\s*(?:ANSWER|CONFIDENCE|KEY_INSIGHTS|STRUCTURED_DATA)|$)/i);
-      const insightsMatch = response.match(/KEY_INSIGHTS:\s*([\s\S]*?)(?=\n\s*(?:ANSWER|CONFIDENCE|REASONING|STRUCTURED_DATA)|$)/i);
-      
+  /**
+ * Parse LLM response and extract structured data with robust JSON parsing
+ */
+private parseLLMResponse(response: string, dataPointCount: number): { 
+  llmResponse: LLMResponse; 
+  generatedTable: string;
+  aiStructuredData: SearchResult[];
+} {
+  console.log("🔍 Starting LLM response parsing...");
+  console.log("Raw response length:", response.length);
+  
+  try {
+    // Step 1: Clean and extract JSON from response
+    const cleanedJson = this.extractAndCleanJSON(response);
+    
+    if (cleanedJson) {
+      console.log("✅ Successfully extracted and parsed JSON response");
+      return this.parseValidJSON(cleanedJson, dataPointCount);
+    }
+    
+    // Step 2: If JSON parsing fails, try fallback text parsing
+    console.log("⚠️ JSON parsing failed, attempting fallback text parsing...");
+    return this.parseFallbackResponse(response, dataPointCount);
+    
+  } catch (error) {
+    console.error("❌ Error parsing LLM response:", error);
+    return this.createErrorResponse(response, dataPointCount, error);
+  }
+}
 
-      const confidence = confidenceMatch ? 
-        (confidenceMatch[1].toLowerCase().includes('high') ? 0.9 :
-         confidenceMatch[1].toLowerCase().includes('medium') ? 0.6 : 0.3) : 0.5;
-
-      // Extract structured data from LLM response
-      const structuredDataMatch = response.match(/STRUCTURED_DATA:\s*(\[[\s\S]*?\])/i);
-      let aiStructuredData: SearchResult[] = [];
+/**
+ * Extract and clean JSON from LLM response with multiple strategies
+ */
+private extractAndCleanJSON(response: string): any | null {
+  const strategies = [
+    // Strategy 1: Direct JSON parsing
+    () => {
+      const trimmed = response.trim();
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        return JSON.parse(trimmed);
+      }
+      return null;
+    },
+    
+    // Strategy 2: Remove markdown code blocks
+    () => {
+      let cleaned = response.trim();
+      cleaned = cleaned.replace(/```json\s*/g, '').replace(/```\s*$/g, '');
+      cleaned = cleaned.replace(/```\s*/g, '').replace(/```\s*$/g, '');
       
-      if (structuredDataMatch) {
-        try {
-          const structuredDataJson = structuredDataMatch[1];
+      if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
+        return JSON.parse(cleaned);
+      }
+      return null;
+    },
+    
+    // Strategy 3: Extract JSON object using regex
+    () => {
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]);
+      }
+      return null;
+    },
+    
+    // Strategy 4: Find complete JSON between braces
+    () => {
+      const firstBrace = response.indexOf('{');
+      const lastBrace = response.lastIndexOf('}');
+      
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        const jsonCandidate = response.substring(firstBrace, lastBrace + 1);
+        return JSON.parse(jsonCandidate);
+      }
+      return null;
+    },
+    
+    // Strategy 5: Fix incomplete JSON by finding last complete field
+    () => {
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        let jsonString = jsonMatch[0];
+        
+        // If JSON doesn't end properly, try to fix it
+        if (!jsonString.trim().endsWith('}')) {
+          // Find the last complete field (ending with ", or })
+          const lastCompleteField = Math.max(
+            jsonString.lastIndexOf('",'),
+            jsonString.lastIndexOf('"}'),
+            jsonString.lastIndexOf('],'),
+            jsonString.lastIndexOf('"}')
+          );
           
-          const parsedData = JSON.parse(structuredDataJson);
-          if (Array.isArray(parsedData)) {
-            aiStructuredData = parsedData.map((item, index) => ({
-              _id: item._id || `ai_generated_${index + 1}`,
-              tenantId: item.tenantId || "ai_analysis",
-              workbookId: item.workbookId || "ai_analysis",
-              sheetId: item.sheetId || "ai_analysis",
-              sheetName: item.sheetName || "AI Analysis Results",
-              rowName: item.rowName || "AI Result",
-              colName: item.colName || "Value",
-              rowIndex: item.rowIndex || index + 1,
-              colIndex: item.colIndex || 1,
-              cellAddress: item.cellAddress || `A${index + 1}`,
-              dataType: item.dataType || "string",
-              unit: item.unit || "N/A",
-              features: {
-                isPercentage: item.features?.isPercentage || false,
-                isMargin: item.features?.isMargin || false,
-                isGrowth: item.features?.isGrowth || false,
-                isAggregation: item.features?.isAggregation || false,
-                isForecast: item.features?.isForecast || false,
-                isUniqueIdentifier: item.features?.isUniqueIdentifier || false
-              },
-              sourceCell: item.sourceCell || "AI_Generated",
-              sourceFormula: item.sourceFormula || null,
-              metric: item.metric || "AI Analysis",
-              value: item.value,
-              year: item.year,
-              month: item.month,
-              quarter: item.quarter,
-              dimensions: item.dimensions || {}
-            }));
-            console.log("✅ Parsed AI structured data:", aiStructuredData.length, "items");
+          if (lastCompleteField > 0) {
+            jsonString = jsonString.substring(0, lastCompleteField + 1);
+            
+            // Ensure proper closing
+            if (jsonString.endsWith(',')) {
+              jsonString = jsonString.slice(0, -1);
+            }
+            jsonString += '}';
           }
-        } catch (parseError) {
-          console.error("❌ Failed to parse structured data from LLM:", parseError);
-          aiStructuredData = [];
         }
+        
+        return JSON.parse(jsonString);
       }
-
-      // Fallback to HTML table if no structured data
-      const tableMatch = response.match(/(<table[^>]*>[\s\S]*?<\/table>)/i);
-      const generatedTable = tableMatch ? tableMatch[1] : '';
-
-      // Parse insights properly - split by lines and filter out empty ones
-      let insights: string[] = [];
-      if (insightsMatch) {
-        insights = insightsMatch[1]
-          .split('\n')
-          .map(line => line.trim())
-          .filter(line => line.length > 0)
-          .map(line => line.replace(/^[-•*]\s*/, '')); // Remove bullet points
+      return null;
+    }
+  ];
+  
+  // Try each strategy in order
+  for (let i = 0; i < strategies.length; i++) {
+    try {
+      console.log(`Trying JSON extraction strategy ${i + 1}...`);
+      const result = strategies[i]();
+      if (result && typeof result === 'object') {
+        console.log(`✅ Strategy ${i + 1} succeeded`);
+        return result;
       }
-
-      // Fallback: if no structured parsing worked, use the full response as answer
-      const finalAnswer = answerMatch ? answerMatch[1].trim() : response.trim();
-      const finalReasoning = reasoningMatch ? reasoningMatch[1].trim() : "Analysis based on available data";
-      
-      console.log("✅ Final parsed response:");
-      console.log("  Answer length:", finalAnswer);
-      console.log("  Reasoning length:", finalReasoning.length);
-      console.log("  Insights count:", insights.length);
-      console.log("  Structured data count:", aiStructuredData.length);
-
-      const llmResponse: LLMResponse = {
-        answer: finalAnswer,
-        confidence,
-        reasoning: finalReasoning,
-        dataPoints: dataPointCount + aiStructuredData.length,
-        sources: insights.length > 0 ? insights : [],
-        generatedTable: generatedTable
-      };
-
-      return { llmResponse, generatedTable, aiStructuredData };
     } catch (error) {
-      console.error("❌ Error parsing LLM response:", error);
-      const llmResponse: LLMResponse = {
-        answer: response.trim(),
-        confidence: 0.5,
-        reasoning: "Response parsing failed, returning raw LLM output",
-        dataPoints: dataPointCount,
-        sources: [],
-        generatedTable: ''
-      };
-      return { llmResponse, generatedTable: '', aiStructuredData: [] };
+      console.log(`❌ Strategy ${i + 1} failed:`, error);
+      continue;
     }
   }
+  
+  return null;
+}
 
+/**
+ * Parse valid JSON response into structured format
+ */
+private parseValidJSON(parsedResponse: any, dataPointCount: number): {
+  llmResponse: LLMResponse;
+  generatedTable: string;
+  aiStructuredData: SearchResult[];
+} {
+  // Extract and validate required fields
+  const answer = this.extractStringField(parsedResponse, 'answer', '');
+  const confidence = this.extractNumberField(parsedResponse, 'confidence', 0.5);
+  const reasoning = this.extractStringField(parsedResponse, 'reasoning', '');
+  const keyInsights = this.extractStringField(parsedResponse, 'keyInsights', '');
+  const sources = this.extractArrayField(parsedResponse, 'sources', []);
+  const rawGeneratedTable = this.extractStringField(parsedResponse, 'generatedTable', '');
+  
+  // Process generated table
+  const generatedTable = this.processGeneratedTable(rawGeneratedTable);
+  
+  // Create LLM response object
+  const llmResponse: LLMResponse = {
+    answer,
+    confidence: Math.max(0, Math.min(1, confidence)), // Ensure confidence is between 0 and 1
+    reasoning,
+    keyInsights,
+    dataPoints: this.extractNumberField(parsedResponse, 'dataPoints', dataPointCount),
+    sources: Array.isArray(sources) ? sources.map(String) : [],
+    generatedTable: rawGeneratedTable
+  };
+  
+  // Extract structured data if present
+  const aiStructuredData = this.extractStructuredData(parsedResponse);
+  
+  console.log("✅ Successfully parsed JSON response:", {
+    answerLength: answer.length,
+    confidence,
+    reasoningLength: reasoning.length,
+    keyInsightsLength: keyInsights.length,
+    sourcesCount: llmResponse.sources.length,
+    hasTable: !!generatedTable,
+    structuredDataCount: aiStructuredData.length
+  });
+  
+  return {
+    llmResponse,
+    generatedTable,
+    aiStructuredData
+  };
+}
+
+/**
+ * Extract string field with fallback
+ */
+private extractStringField(obj: any, fieldName: string, defaultValue: string): string {
+  const value = obj[fieldName];
+  if (typeof value === 'string') return value.trim();
+  if (value !== null && value !== undefined) return String(value).trim();
+  return defaultValue;
+}
+
+/**
+ * Extract number field with validation
+ */
+private extractNumberField(obj: any, fieldName: string, defaultValue: number): number {
+  const value = obj[fieldName];
+  if (typeof value === 'number' && !isNaN(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = parseFloat(value);
+    if (!isNaN(parsed)) return parsed;
+  }
+  return defaultValue;
+}
+
+/**
+ * Extract array field with validation
+ */
+private extractArrayField(obj: any, fieldName: string, defaultValue: any[]): any[] {
+  const value = obj[fieldName];
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // If it's a comma-separated string, split it
+      return value.split(',').map(item => item.trim()).filter(item => item.length > 0);
+    }
+  }
+  return defaultValue;
+}
+
+/**
+ * Process generated table format
+ */
+private processGeneratedTable(tableContent: string): string {
+  if (!tableContent || tableContent.trim().length === 0) {
+    return '';
+  }
+  
+  // Clean up table markers
+  let cleaned = tableContent;
+  if (cleaned.includes("TABLE_START:")) {
+    cleaned = cleaned.replace("TABLE_START:", "").replace("TABLE_END", "").trim();
+  }
+  
+  // Convert markdown table to HTML if it's markdown format
+  if (cleaned.includes("|") && !cleaned.includes("<table")) {
+    return this.convertMarkdownTableToHTML(cleaned);
+  }
+  
+  // If it's already HTML, return as is
+  if (cleaned.includes("<table")) {
+    return cleaned;
+  }
+  
+  // If it's just text, wrap in basic table
+  if (cleaned.length > 0) {
+    return `<div class="table-content">${cleaned}</div>`;
+  }
+  
+  return '';
+}
+
+/**
+ * Convert markdown table to HTML
+ */
+private convertMarkdownTableToHTML(markdownTable: string): string {
+  try {
+    const lines = markdownTable.split('\n').filter(line => line.trim());
+    if (lines.length === 0) return '';
+    
+    let htmlTable = '<table class="min-w-full border-collapse border border-gray-300">';
+    
+    lines.forEach((line, index) => {
+      // Skip separator lines (like |---|---|)
+      if (line.includes('---')) return;
+      
+      const cells = line.split('|').map(cell => cell.trim()).filter(cell => cell);
+      if (cells.length === 0) return;
+      
+      if (index === 0) {
+        // Header row
+        htmlTable += '<thead><tr>';
+        cells.forEach(cell => {
+          htmlTable += `<th class="border border-gray-300 px-4 py-2 bg-gray-100 font-semibold">${cell}</th>`;
+        });
+        htmlTable += '</tr></thead><tbody>';
+      } else {
+        // Data row
+        htmlTable += '<tr>';
+        cells.forEach(cell => {
+          htmlTable += `<td class="border border-gray-300 px-4 py-2">${cell}</td>`;
+        });
+        htmlTable += '</tr>';
+      }
+    });
+    
+    htmlTable += '</tbody></table>';
+    return htmlTable;
+  } catch (error) {
+    console.error("Error converting markdown table to HTML:", error);
+    return `<div class="table-content">${markdownTable}</div>`;
+  }
+}
+
+/**
+ * Extract structured data from response
+ */
+private extractStructuredData(parsedResponse: any): SearchResult[] {
+  try {
+    const structuredDataField = parsedResponse.structuredData || parsedResponse.aiStructuredData;
+    
+    if (!structuredDataField || !Array.isArray(structuredDataField)) {
+      return [];
+    }
+    
+    return structuredDataField.map((item, index) => ({
+      _id: item._id || `ai_generated_${index + 1}`,
+      tenantId: item.tenantId || "ai_analysis",
+      workbookId: item.workbookId || "ai_analysis", 
+      sheetId: item.sheetId || "ai_analysis",
+      sheetName: item.sheetName || "AI Analysis Results",
+      rowName: item.rowName || "AI Result",
+      colName: item.colName || "Value",
+      rowIndex: item.rowIndex || index + 1,
+      colIndex: item.colIndex || 1,
+      cellAddress: item.cellAddress || `A${index + 1}`,
+      dataType: item.dataType || "string",
+      unit: item.unit || "N/A",
+      features: {
+        isPercentage: item.features?.isPercentage || false,
+        isMargin: item.features?.isMargin || false,
+        isGrowth: item.features?.isGrowth || false,
+        isAggregation: item.features?.isAggregation || false,
+        isForecast: item.features?.isForecast || false,
+        isUniqueIdentifier: item.features?.isUniqueIdentifier || false
+      },
+      sourceCell: item.sourceCell || "AI_Generated",
+      sourceFormula: item.sourceFormula || null,
+      metric: item.metric || "AI Analysis",
+      value: item.value,
+      year: item.year,
+      month: item.month,
+      quarter: item.quarter,
+      dimensions: item.dimensions || {},
+      semanticString: item.semanticString || item.metric || "AI Analysis"
+    }));
+  } catch (error) {
+    console.error("Error extracting structured data:", error);
+    return [];
+  }
+}
+
+/**
+ * Fallback parsing for non-JSON responses
+ */
+private parseFallbackResponse(response: string, dataPointCount: number): {
+  llmResponse: LLMResponse;
+  generatedTable: string;
+  aiStructuredData: SearchResult[];
+} {
+  console.log("🔄 Using fallback text-based parsing...");
+  
+  // Extract fields using regex patterns
+  const extractField = (pattern: RegExp, defaultValue: string = ''): string => {
+    const match = response.match(pattern);
+    return match ? match[1].trim() : defaultValue;
+  };
+  
+  const answer = extractField(/(?:ANSWER|answer):\s*([\s\S]*?)(?=\n\s*(?:CONFIDENCE|REASONING|KEY_INSIGHTS|confidence|reasoning|keyInsights)|$)/i) ||
+                 extractField(/"answer"\s*:\s*"([^"]*(?:\\.[^"]*)*)"/) ||
+                 response.trim();
+  
+  const reasoningText = extractField(/(?:REASONING|reasoning):\s*([\s\S]*?)(?=\n\s*(?:ANSWER|CONFIDENCE|KEY_INSIGHTS|answer|confidence|keyInsights)|$)/i) ||
+                       extractField(/"reasoning"\s*:\s*"([^"]*(?:\\.[^"]*)*)"/) ||
+                       "Analysis based on available data";
+  
+  const keyInsightsText = extractField(/(?:KEY_INSIGHTS|keyInsights):\s*([\s\S]*?)(?=\n\s*(?:ANSWER|CONFIDENCE|REASONING|answer|confidence|reasoning)|$)/i) ||
+                         extractField(/"keyInsights"\s*:\s*"([^"]*(?:\\.[^"]*)*)"/) ||
+                         "";
+  
+  const confidenceText = extractField(/(?:CONFIDENCE|confidence):\s*([\s\S]*?)(?=\n\s*(?:ANSWER|REASONING|KEY_INSIGHTS|answer|reasoning|keyInsights)|$)/i) ||
+                        extractField(/"confidence"\s*:\s*([\d.]+)/);
+  
+  // Parse confidence
+  let confidence = 0.5;
+  if (confidenceText) {
+    const numericConfidence = parseFloat(confidenceText);
+    if (!isNaN(numericConfidence)) {
+      confidence = Math.max(0, Math.min(1, numericConfidence));
+    } else if (confidenceText.toLowerCase().includes('high')) {
+      confidence = 0.9;
+    } else if (confidenceText.toLowerCase().includes('medium')) {
+      confidence = 0.6;
+    } else if (confidenceText.toLowerCase().includes('low')) {
+      confidence = 0.3;
+    }
+  }
+  
+  // Extract sources
+  const sourcesText = extractField(/(?:SOURCES|sources):\s*([\s\S]*?)(?=\n\s*(?:ANSWER|CONFIDENCE|REASONING|KEY_INSIGHTS)|$)/i) ||
+                     extractField(/"sources"\s*:\s*\[(.*?)\]/);
+  
+  let sources: string[] = [];
+  if (sourcesText) {
+    try {
+      sources = JSON.parse(`[${sourcesText}]`);
+    } catch {
+      sources = sourcesText.split(',').map(s => s.trim().replace(/["\[\]]/g, '')).filter(s => s.length > 0);
+    }
+  }
+  
+  // Extract table
+  const tableMatch = response.match(/(?:TABLE_START:|<table[^>]*>)([\s\S]*?)(?:TABLE_END|<\/table>)/i) ||
+                    response.match(/(\|.*\|[\s\S]*?\|.*\|)/);
+  
+  let generatedTable = '';
+  if (tableMatch) {
+    const tableContent = tableMatch[1].trim();
+    if (tableContent.includes('|') && !tableContent.includes('<table')) {
+      generatedTable = this.convertMarkdownTableToHTML(tableContent);
+    } else {
+      generatedTable = tableContent;
+    }
+  }
+  
+  const llmResponse: LLMResponse = {
+    answer: answer || "Unable to parse response properly",
+    confidence,
+    reasoning: reasoningText,
+    keyInsights: keyInsightsText,
+    dataPoints: dataPointCount,
+    sources,
+    generatedTable: tableMatch ? tableMatch[1].trim() : ''
+  };
+  
+  console.log("✅ Fallback parsing completed:", {
+    answerLength: llmResponse.answer.length,
+    confidence: llmResponse.confidence,
+    reasoningLength: llmResponse.reasoning.length,
+    keyInsightsLength: llmResponse.keyInsights?.length,
+    sourcesCount: llmResponse.sources.length,
+    hasTable: !!generatedTable
+  });
+  
+  return {
+    llmResponse,
+    generatedTable,
+    aiStructuredData: []
+  };
+}
+
+/**
+ * Create error response when all parsing fails
+ */
+private createErrorResponse(response: string, dataPointCount: number, error: any): {
+  llmResponse: LLMResponse;
+  generatedTable: string;
+  aiStructuredData: SearchResult[];
+} {
+  console.error("Creating error response due to parsing failure:", error);
+  
+  const llmResponse: LLMResponse = {
+    answer: response.trim() || "Unable to generate response",
+    confidence: 0.2,
+    reasoning: `Response parsing failed: ${error instanceof Error ? error.message : 'Unknown error'}. Returning raw response.`,
+    keyInsights: "Unable to extract insights due to parsing error",
+    dataPoints: dataPointCount,
+    sources: ["Parsing Error"],
+    generatedTable: ""
+  };
+  
+  return {
+    llmResponse,
+    generatedTable: "",
+    aiStructuredData: []
+  };
+}
   /**
    * Main enhanced search function implementing the improved three-stage pipeline
    */
@@ -1181,6 +1945,7 @@ EXAMPLE STRUCTURED DATA:
     enhancedQuery: EnhancedQuery;
     vectorResults: SearchResult[];
     structuredData: SearchResult[];
+    fullDataForTable: SearchResult[];
     llmResponse: LLMResponse;
     generatedTable: string;
     searchMetadata: {
@@ -1210,7 +1975,7 @@ EXAMPLE STRUCTURED DATA:
     // 2️⃣ Stage 1: Vector Search with proper filtering
     const vectorStartTime = Date.now();
     const vectorResults = await this.performVectorSearch(
-      enhancedQuery.normalizedQuery,
+      enhancedQuery,
       workbookId,
       tenantId,
       topK
@@ -1235,9 +2000,12 @@ EXAMPLE STRUCTURED DATA:
     );
     const llmGenerationTime = Date.now() - llmStartTime;
 
+    // Use full data for table display (includes all retrieved data)
+    const fullDataForTable = llmResult.fullDataForTable || structuredData;
+    
     // Merge original structured data with AI-generated structured data
     const combinedStructuredData = [...structuredData, ...llmResult.aiStructuredData];
-    
+
     // Extract the generated table from the LLM response
     const generatedTable = llmResult.llmResponse.generatedTable || '';
 
@@ -1253,6 +2021,7 @@ EXAMPLE STRUCTURED DATA:
       enhancedQuery,
       vectorResults,
       structuredData: combinedStructuredData, // Return combined data
+      fullDataForTable: fullDataForTable, // Full data for table display
       llmResponse: llmResult.llmResponse,
       generatedTable,
       searchMetadata: {

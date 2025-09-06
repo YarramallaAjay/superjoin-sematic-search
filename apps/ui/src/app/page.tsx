@@ -36,9 +36,19 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResponse | null>(null);
   const [isSearching, setIsSearching] = useState(false);
+  const [isLoadingResponse, setIsLoadingResponse] = useState(false);
   const [workbooks, setWorkbooks] = useState<Workbook[]>([]);
+  
+  // Simple loading state management
   const [selectedWorkbook, setSelectedWorkbook] = useState<Workbook | null>(null);
   const [isLoadingWorkbooks, setIsLoadingWorkbooks] = useState(false);
+  
+  // Effect to manage loading state when search results are received
+  useEffect(() => {
+    if (searchResults?.llmResponse) {
+      setIsLoadingResponse(false);
+    }
+  }, [searchResults?.llmResponse]);
   
   // Table state variables
   const [tableSearchTerm, setTableSearchTerm] = useState('');
@@ -238,6 +248,7 @@ export default function Home() {
 
     try {
       setIsSearching(true);
+      setIsLoadingResponse(true);
       const results = await apiService.searchWithWorkbook(
         searchQuery,
         selectedWorkbook.id,
@@ -538,9 +549,10 @@ export default function Home() {
                               <CardTitle className="text-green-800 flex items-center gap-2">
                                 <span className="text-2xl">🤖</span>
                                 AI Analysis & Response
+                                {isLoadingResponse && <Loader2 className="h-4 w-4 animate-spin text-green-600" />}
                               </CardTitle>
                               <CardDescription>
-                                Complete AI analysis including answer, reasoning, and key insights
+                                {isLoadingResponse ? "AI is analyzing and generating response..." : "Complete AI analysis including answer, reasoning, and key insights"}
                               </CardDescription>
                             </div>
                           </div>
@@ -571,22 +583,34 @@ export default function Home() {
                           )}
 
                           {/* Key Insights */}
-                          {searchResults.llmResponse.sources && searchResults.llmResponse.sources.length > 0 && (
+                          {searchResults.llmResponse.keyInsights && (
                             <div className="bg-white p-4 rounded-lg border border-purple-100">
                               <h4 className="text-lg font-semibold text-purple-800 mb-3 flex items-center gap-2">
                                 <span className="text-xl">🔍</span>
                                 Key Insights
                               </h4>
+                              <div className="text-purple-900 whitespace-pre-wrap leading-relaxed">
+                                {searchResults.llmResponse.keyInsights}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Sources */}
+                          {searchResults.llmResponse.sources && searchResults.llmResponse.sources.length > 0 && (
+                            <div className="bg-white p-4 rounded-lg border border-orange-100">
+                              <h4 className="text-lg font-semibold text-orange-800 mb-3 flex items-center gap-2">
+                                <span className="text-xl">📚</span>
+                                Sources
+                              </h4>
                               <div className="space-y-2">
-                                {searchResults.llmResponse.sources.map((insight, index) => (
-                                  <div key={index} className="text-purple-900 whitespace-pre-wrap leading-relaxed p-3 bg-purple-50 rounded-lg border border-purple-100">
-                                    {insight}
+                                {searchResults.llmResponse.sources.map((source, index) => (
+                                  <div key={index} className="text-orange-900 whitespace-pre-wrap leading-relaxed p-3 bg-orange-50 rounded-lg border border-orange-100">
+                                    {source}
                                   </div>
                                 ))}
                               </div>
                             </div>
                           )}
-
 
                           {/* Metadata */}
                           <div className="bg-white p-4 rounded-lg border border-gray-100">
@@ -611,7 +635,7 @@ export default function Home() {
                                 <div className="text-2xl font-bold text-purple-600">
                                   {searchResults.llmResponse.sources?.length || 0}
                                 </div>
-                                <div className="text-sm text-gray-600">Insights</div>
+                                <div className="text-sm text-gray-600">Sources</div>
                               </div>
                               <div className="text-center">
                                 <div className="text-2xl font-bold text-orange-600">
@@ -699,7 +723,7 @@ export default function Home() {
                                       <div className="flex items-center gap-2 text-yellow-800">
                                         <span className="text-xl">⚠️</span>
                                         <span className="font-medium">Fallback Analysis</span>
-                                      </div>
+                          </div>
                                       <div className="text-sm text-yellow-700 mt-1">
                                         AI didn't generate structured data, showing analysis from text response
                                       </div>
@@ -848,23 +872,7 @@ export default function Home() {
                       </Card>
                     )}
 
-                    {/* LLM Generated Table (Fallback) */}
-                    {searchResults.generatedTable && !searchResults.structuredData?.some(item => item.sheetName === "AI Analysis Results") && (
-                      <Card className="bg-blue-50 border-blue-200">
-                        <CardHeader>
-                          <CardTitle className="text-blue-800">AI Generated Table</CardTitle>
-                          <CardDescription>
-                            Dynamic table structure created by AI based on the analysis
-                          </CardDescription>
-                        </CardHeader>
-                        <CardContent>
-                          <div 
-                            className="overflow-x-auto"
-                            dangerouslySetInnerHTML={{ __html: searchResults.generatedTable }}
-                          />
-                        </CardContent>
-                      </Card>
-                    )}
+                    
 
                     {/* Original Search Results Table */}
                     {searchResults.structuredData && searchResults.structuredData.filter(item => item.sheetName !== "AI Analysis Results").length > 0 && (
@@ -992,13 +1000,13 @@ export default function Home() {
                                   }
                                   
                                   // Handle values properly based on data type
-                                  let displayValue = item.value;
-                                  if (item.value !== null && item.value !== undefined) {
+                            let displayValue = item.value;
+                            if (item.value !== null && item.value !== undefined) {
                                     if (item.dataType === 'date') {
                                       // Only format as date if explicitly marked as date type
                                       if (typeof item.value === 'string' && item.value.match(/^\d{1,2}\/\d{1,2}\/\d{2,4}$/)) {
-                                        displayValue = item.value;
-                                      } else {
+                                displayValue = item.value;
+                              } else {
                                         displayValue = String(item.value);
                                       }
                                     } else if (item.dataType === 'percent') {
@@ -1008,16 +1016,16 @@ export default function Home() {
                                         String(item.value);
                                     } else if (item.dataType === 'number') {
                                       // Format numeric values
-                                      displayValue = typeof item.value === 'number' ? 
-                                        new Intl.NumberFormat('en-IN').format(item.value) : 
-                                        String(item.value);
+                                displayValue = typeof item.value === 'number' ? 
+                                  new Intl.NumberFormat('en-IN').format(item.value) : 
+                                  String(item.value);
                                     } else {
                                       // String values
                                       displayValue = String(item.value);
-                                    }
-                                  } else {
-                                    displayValue = 'N/A';
-                                  }
+                              }
+                            } else {
+                              displayValue = 'N/A';
+                            }
                                   
                                   pivotData.get(rowName)!.set(colName, {
                                     value: displayValue,
@@ -1033,8 +1041,8 @@ export default function Home() {
                                 
                                 const sortedRows = Array.from(allRows).sort();
                                 const sortedColumns = Array.from(allColumns).sort();
-                                
-                                return (
+
+                            return (
                                   <TabsContent key={sheetName} value={sheetName} className="mt-4">
                                     <div className="space-y-4">
                                       {/* Sheet Header */}
@@ -1046,7 +1054,7 @@ export default function Home() {
                                           <p className="text-sm text-gray-600">
                                             {sheetItems.length} data points • {sortedRows.length} rows • {sortedColumns.length} columns
                                           </p>
-                                        </div>
+                                  </div>
                                         <div className="flex gap-2">
                                           <Badge variant="outline">
                                             {sortedRows.length} Rows
@@ -1078,8 +1086,8 @@ export default function Home() {
                                                 <TableCell className="sticky left-0 bg-gray-50 border-r font-medium">
                                                   <div className="font-semibold text-sm">
                                                     {rowName}
-                                                  </div>
-                                                </TableCell>
+                                  </div>
+                                </TableCell>
                                                 {sortedColumns.map((colName) => {
                                                   const cellData = pivotData.get(rowName)?.get(colName);
                                                   
@@ -1097,34 +1105,34 @@ export default function Home() {
                                                         cellData.dataType === 'number' ? 'text-green-600' : 
                                                         cellData.dataType === 'percent' ? 'text-purple-600' :
                                                         cellData.dataType === 'date' ? 'text-blue-600' :
-                                                        'text-gray-600'
-                                                      }`}>
+                                    'text-gray-600'
+                                  }`}>
                                                         {cellData.value}
-                                                      </div>
+                                  </div>
                                                       
-                                                      {/* Show time context if available */}
+                                  {/* Show time context if available */}
                                                       {(cellData.year || cellData.month || cellData.quarter) && (
-                                                        <div className="text-xs text-gray-500 mt-1">
+                                    <div className="text-xs text-gray-500 mt-1">
                                                           {cellData.year && <span className="mr-1">📅{cellData.year}</span>}
                                                           {cellData.month && <span className="mr-1">📆{cellData.month}</span>}
                                                           {cellData.quarter && <span>🗓️{cellData.quarter}</span>}
-                                                        </div>
-                                                      )}
+                                    </div>
+                                  )}
                                                       
                                                       {/* Show score if available */}
                                                       {cellData.score && (
                                                         <div className="text-xs text-gray-400 mt-1 font-mono">
                                                           {cellData.score.toFixed(3)}
-                                                        </div>
+                                    </div>
                                                       )}
-                                                    </TableCell>
-                                                  );
-                                                })}
+                                </TableCell>
+                            );
+                          })}
                                               </TableRow>
                                             ))}
-                                          </TableBody>
-                                        </Table>
-                                      </div>
+                        </TableBody>
+                      </Table>
+                              </div>
                                     </div>
                                   </TabsContent>
                                 );

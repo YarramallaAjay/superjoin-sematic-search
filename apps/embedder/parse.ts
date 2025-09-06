@@ -485,13 +485,13 @@ export class ExcelParser {
           // Parse as numeric value (integers, floats, decimals, percentages)
           const numericValue = this.parseNumericValue(cellValue);
           if (numericValue !== null) {
-            processedValue = numericValue;
+          processedValue = numericValue;
             
             // Determine if it's a percentage based on the original value
             if (typeof cellValue === "string" && cellValue.includes('%')) {
               dataType = "percent";
             } else {
-              dataType = "number";
+          dataType = "number";
             }
           } else {
             // If numeric parsing failed, treat as string
