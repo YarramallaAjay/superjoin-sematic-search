@@ -599,7 +599,8 @@ export class EnhancedSearch {
       const directPipeline = [
         {
           $match: {
-            tenantId: tenantId
+            tenantId: tenantId,
+            workbookId:workbookId
           }
         },
         {
@@ -778,6 +779,7 @@ export class EnhancedSearch {
       }
 
       const text = result.response.text();
+      console.log(result.response)
 
       if (!text || text.trim().length === 0) {
         throw new Error("Empty response from Gemini API");
@@ -817,7 +819,15 @@ export class EnhancedSearch {
   private prepareLLMContext(data: SearchResult[]): { context: string } {
     if (!data || data.length === 0) {
       return {
-        context: "No structured data available for analysis.",
+        context: JSON.stringify({
+          totalDataPoints: 0,
+          availableMetrics: [],
+          availableSheets: [],
+          availableYears: [],
+          availableMonths: [],
+          groupedData: [],
+          message: "No structured data available for analysis."
+        }, null, 2),
       };
     }
 
@@ -838,7 +848,8 @@ export class EnhancedSearch {
     }[]> = new Map();
     
     data.forEach((item) => {
-      const key = `${item.sheetName}`;
+      // Group by metric (business term) instead of just sheet name
+      const key = item.metric || item.colName || 'Unknown Metric';
       
       const groupedItem: {
         workbookId: string;
@@ -865,11 +876,10 @@ export class EnhancedSearch {
         unit: item.unit || 'N/A'
       };
       
-      if (item.dataType === "date") {
-        if (item.year) groupedItem.year = String(item.year);
-        if (item.month) groupedItem.month = item.month;
-        if (item.quarter) groupedItem.quarter = item.quarter;
-      }
+      // Add time dimensions for all items, not just dates
+      if (item.year) groupedItem.year = String(item.year);
+      if (item.month) groupedItem.month = item.month;
+      if (item.quarter) groupedItem.quarter = item.quarter;
       
       if (!groupedData.has(key)) {
         groupedData.set(key, []);
@@ -879,13 +889,28 @@ export class EnhancedSearch {
 
     const contextData = {
       totalDataPoints: data.length,
+      availableMetrics: Array.from(groupedData.keys()),
+      availableSheets: [...new Set(data.map(item => item.sheetName))],
+      availableYears: [...new Set(data.map(item => item.year).filter(Boolean))],
+      availableMonths: [...new Set(data.map(item => item.month).filter(Boolean))],
       groupedData: Array.from(groupedData.entries()).map(([key, items]) => ({
         metric: key,
-        items: items
+        itemCount: items.length,
+        sampleValues: items.slice(0, 5).map(item => ({
+          rowName: item.rowName,
+          value: item.value,
+          year: item.year,
+          month: item.month,
+          quarter: item.quarter,
+          dataType: item.dataType
+        })),
+        allItems: items
       }))
     };
 
     const context = JSON.stringify(contextData, null, 2);
+    
+    
     return { context };
   }
 
@@ -901,9 +926,26 @@ CONTEXT DATA:
 ${contextData.context}
 
 INSTRUCTIONS:
-1. Understand the query thoroughly and analyze the context data provided
-2. If additional data is needed, inform the user about it and continue with generating the result
-3. Based on the query type, provide appropriate analysis:
+1. Analyze the context data structure:
+   - totalDataPoints: Total number of data points available
+   - availableMetrics: List of business metrics (Revenue, Sales, etc.)
+   - availableSheets: List of Excel sheets
+   - availableYears: List of years in the data
+   - availableMonths: List of months in the data
+   - groupedData: Data grouped by metric with sample values and all items
+
+2. Understand the query thoroughly and match it with available data:
+   - Check if the requested metrics exist in availableMetrics
+   - Check if the requested time periods exist in availableYears/availableMonths
+   - Use the groupedData to find relevant information
+
+3. If the exact data is not available:
+   - Clearly state what data is NOT available
+   - List what data IS available (metrics, years, months)
+   - Provide analysis based on the available data
+   - Suggest alternative queries that can be answered with the available data
+
+4. Based on the query type, provide appropriate analysis:
    - If the result is to list out, list the results according to the context data
    - If the result is to calculate, calculate the result according to the context data
    - If the result is to show, show the result according to the context data
@@ -1092,7 +1134,7 @@ EXAMPLE STRUCTURED DATA:
       const finalReasoning = reasoningMatch ? reasoningMatch[1].trim() : "Analysis based on available data";
       
       console.log("✅ Final parsed response:");
-      console.log("  Answer length:", finalAnswer.length);
+      console.log("  Answer length:", finalAnswer);
       console.log("  Reasoning length:", finalReasoning.length);
       console.log("  Insights count:", insights.length);
       console.log("  Structured data count:", aiStructuredData.length);

@@ -77,7 +77,7 @@ export class ExcelParser {
                         'july', 'august', 'september', 'october', 'november', 'december'];
 
   /**
-   * Main function to parse and upload cells
+   * Main function to parse and upload cells - ASYNC OPTIMIZED VERSION
    */
   async parseAndUploadCells(
     tenantId: string,
@@ -87,10 +87,9 @@ export class ExcelParser {
     onSheetParsed?: (sheetName: string, rowCount: number, colCount: number, cellCount: number) => Promise<void>
   ): Promise<EnhancedParsedCell[]> {
     const wb = XLSX.read(buffer, { type: "buffer" });
-    const allCells: EnhancedParsedCell[] = [];
-
-
-    for (const sheetName of wb.SheetNames) {
+    
+    // Process all sheets in parallel for better performance
+    const sheetPromises = wb.SheetNames.map(async (sheetName) => {
       const ws = wb.Sheets[sheetName];
       
       // Get the actual range of data in the sheet
@@ -98,34 +97,37 @@ export class ExcelParser {
       const maxRow = range.e.r;
       const maxCol = range.e.c;
       
-
-      // Parse the sheet synchronously
-      const sheetCells = this.parseSheet(ws, sheetName, maxRow, maxCol, tenantId, workbookId);
+      // Parse the sheet asynchronously
+      const sheetCells = await this.parseSheetAsync(ws, sheetName, maxRow, maxCol, tenantId, workbookId);
       
-
-      // Call the callback for each cell
-      for (const cell of sheetCells) {
-        if (onCellParsed) await onCellParsed(cell, cell._id);
+      // Process cell callbacks in batches to avoid overwhelming the system
+      if (onCellParsed && sheetCells.length > 0) {
+        await this.processCellCallbacks(sheetCells, onCellParsed);
       }
 
+      // Call sheet parsed callback
       if (onSheetParsed) {
         await onSheetParsed(sheetName, maxRow + 1, maxCol + 1, sheetCells.length);
       }
 
-      allCells.push(...sheetCells);
-    }
+      return sheetCells;
+    });
 
+    // Wait for all sheets to be processed
+    const sheetResults = await Promise.all(sheetPromises);
+    const allCells = sheetResults.flat();
 
-    // Generate embeddings for all cells at once
+    // Generate embeddings for all cells at once (already optimized)
     const semanticStrings = allCells.map(cell => ({
       cellId: cell._id,
       semanticString: cell.semanticString
     }));
+    
     const embeddings = await makeEmbeddingsOptimized(semanticStrings);
-    if(embeddings.length!==allCells.length){
-      console.log("All embeddings are not generated")
+    if(embeddings.length !== allCells.length){
       throw new Error("All embeddings are not generated");
     }
+    
     // Attach embeddings to cells using cellId mapping
     embeddings.forEach((embeddingResult) => {
       const cell = allCells.find(cell => cell._id === embeddingResult.cellId);
@@ -139,9 +141,307 @@ export class ExcelParser {
   }
 
   /**
-   * Parse a single sheet
+   * Process cell callbacks in batches to avoid overwhelming the system
    */
-  private parseSheet(
+  private async processCellCallbacks(
+    cells: EnhancedParsedCell[],
+    onCellParsed: (cell: EnhancedParsedCell, cellId: string) => Promise<void>
+  ): Promise<void> {
+    const batchSize = 50; // Process 50 cells at a time
+    
+    for (let i = 0; i < cells.length; i += batchSize) {
+      const batch = cells.slice(i, i + batchSize);
+      
+      // Process batch in parallel
+      const batchPromises = batch.map(cell => onCellParsed(cell, cell._id));
+      await Promise.all(batchPromises);
+      
+      // Small delay between batches to prevent overwhelming the system
+      if (i + batchSize < cells.length) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+  }
+
+  /**
+   * Parse a single sheet asynchronously
+   */
+  private async parseSheetAsync(
+    ws: XLSX.WorkSheet, 
+    sheetName: string, 
+    maxRow: number, 
+    maxCol: number,
+    tenantId: string,
+    workbookId: string
+  ): Promise<EnhancedParsedCell[]> {
+    // Use setImmediate to make this truly async and non-blocking
+    return new Promise((resolve) => {
+      setImmediate(async () => {
+        const result = await this.parseSheet(ws, sheetName, maxRow, maxCol, tenantId, workbookId);
+        resolve(result);
+      });
+    });
+  }
+
+  /**
+   * Parse a single sheet (synchronous version - kept for compatibility)
+   */
+  private async parseSheet(
+    ws: XLSX.WorkSheet, 
+    sheetName: string, 
+    maxRow: number, 
+    maxCol: number,
+    tenantId: string,
+    workbookId: string
+  ): Promise<EnhancedParsedCell[]> {
+    const cells: EnhancedParsedCell[] = [];
+    const timeInfo: { year?: number; month?: string; quarter?: string; hour?: number; ampm?: string } = {};
+    
+    // First pass: identify headers and data structure
+    const headers = this.extractHeaders(ws, maxRow, maxCol);
+    const dataStartRow = headers.dataStartRow;
+    
+    console.log(`   → Headers found at row ${headers.rowHeaders}:`, headers.columnHeaders);
+    console.log(`   → Data starts at row ${dataStartRow}`);
+
+    // Second pass: parse data cells with async-friendly processing
+    const cellPromises: Promise<EnhancedParsedCell | null>[] = [];
+    
+    for (let rowIndex = dataStartRow; rowIndex <= maxRow; rowIndex++) {
+      const rowData = this.extractRowData(ws, rowIndex, maxCol, headers);
+      
+      // Process each column in the row
+      for (let colIndex = 0; colIndex < headers.columnHeaders.length; colIndex++) {
+        // Create a promise for each cell to allow for async processing
+        const cellPromise = this.processCellAsync(
+          ws, rowIndex, colIndex, rowData, headers, 
+          sheetName, tenantId, workbookId
+        );
+        cellPromises.push(cellPromise);
+      }
+    }
+    
+    // Wait for all cells to be processed
+    const cellResults = await Promise.all(cellPromises);
+    const validCells = cellResults.filter(cell => cell !== null) as EnhancedParsedCell[];
+    
+    return validCells;
+  }
+
+  /**
+   * Process a single cell asynchronously
+   */
+  private async processCellAsync(
+    ws: XLSX.WorkSheet,
+    rowIndex: number,
+    colIndex: number,
+    rowData: any[],
+    headers: HeaderInfo,
+    sheetName: string,
+    tenantId: string,
+    workbookId: string
+  ): Promise<EnhancedParsedCell | null> {
+    return new Promise((resolve) => {
+      setImmediate(() => {
+        try {
+          const colName = headers.columnHeaders[colIndex];
+          const cellValue = rowData[colIndex];
+            
+          // Skip empty cells
+          if (cellValue === null || cellValue === undefined || cellValue === '') {
+            resolve(null);
+            return;
+          }
+
+          // Process values with improved type detection
+          let processedValue: any = null;
+          let dataType: "number" | "string" | "date" | "percent" | "ratio" = "string";
+          
+          // First, check if it's explicitly a date (string patterns only)
+          if (this.isDateValue(cellValue)) {
+            processedValue = cellValue;
+            dataType = "date";
+          } else if (this.isNumeric(cellValue)) {
+            // Parse as numeric value (integers, floats, decimals, percentages)
+            const numericValue = this.parseNumericValue(cellValue);
+            if (numericValue !== null) {
+              processedValue = numericValue;
+              
+              // Determine if it's a percentage based on the original value
+              if (typeof cellValue === "string" && cellValue.includes('%')) {
+                dataType = "percent";
+              } else {
+                dataType = "number";
+              }
+            } else {
+              // If numeric parsing failed, treat as string
+              processedValue = String(cellValue);
+              dataType = "string";
+            }
+          } else {
+            // Non-numeric, non-date values are treated as strings
+            processedValue = String(cellValue);
+            dataType = "string";
+          }
+
+          // Extract row name (first column or coded value)
+          const rowName = this.extractRowName(rowData, headers);
+          
+          // Extract time information
+          const timeInfo = this.extractTimeInfo(rowData);
+          
+          // For coded rows like "CUST_001", use headers like "customer_region"
+          // For normal rows, use "RowName_ColName" format
+          const semanticString = this.buildSemanticString(sheetName, rowName, colName, rowData, headers.columnHeaders);
+          
+          // Create cell object
+          const cell: EnhancedParsedCell = {
+            _id: `cell_${Math.random().toString(36).substring(2, 15)}`,
+            tenantId,
+            workbookId,
+            sheetId: `sh_${sheetName.toLowerCase().replace(/\s+/g, "_")}`,
+            sheetName,
+            
+            rowIndex: rowIndex + 1, // 1-based
+            colIndex: colIndex + 1, // 1-based
+            rowName,
+            colName,
+            cellAddress: XLSX.utils.encode_cell({ r: rowIndex, c: colIndex }),
+            
+            rawValue: cellValue,
+            value: processedValue, // Store the actual value (numeric or date)
+            metric: colName,
+            
+            semanticString,
+
+            year: timeInfo.year,
+            month: timeInfo.month,
+            quarter: timeInfo.quarter,
+            
+            dimensions: this.extractDimensions(rowData, headers.columnHeaders),
+            
+            dataType: dataType,
+            unit: this.determineUnit(colName),
+            features: this.determineFeatures(colName, cellValue, rowIndex, headers.dataStartRow),
+
+            embedding: [],
+            sourceCell: XLSX.utils.encode_cell({ r: rowIndex, c: colIndex }),
+            sourceFormula: null,
+          };
+
+          resolve(cell);
+        } catch (error) {
+          // If there's an error processing the cell, return null
+          resolve(null);
+        }
+      });
+    });
+  }
+
+  /**
+   * Legacy synchronous cell processing (kept for compatibility)
+   */
+  private processCellSync(
+    ws: XLSX.WorkSheet,
+    rowIndex: number,
+    colIndex: number,
+    rowData: any[],
+    headers: HeaderInfo,
+    sheetName: string,
+    tenantId: string,
+    workbookId: string
+  ): EnhancedParsedCell | null {
+    const colName = headers.columnHeaders[colIndex];
+    const cellValue = rowData[colIndex];
+      
+    // Skip empty cells
+    if (cellValue === null || cellValue === undefined || cellValue === '') {
+      return null;
+    }
+
+    // Process values with improved type detection
+    let processedValue: any = null;
+    let dataType: "number" | "string" | "date" | "percent" | "ratio" = "string";
+    
+    // First, check if it's explicitly a date (string patterns only)
+    if (this.isDateValue(cellValue)) {
+      processedValue = cellValue;
+      dataType = "date";
+    } else if (this.isNumeric(cellValue)) {
+      // Parse as numeric value (integers, floats, decimals, percentages)
+      const numericValue = this.parseNumericValue(cellValue);
+      if (numericValue !== null) {
+        processedValue = numericValue;
+        
+        // Determine if it's a percentage based on the original value
+        if (typeof cellValue === "string" && cellValue.includes('%')) {
+          dataType = "percent";
+        } else {
+          dataType = "number";
+        }
+      } else {
+        // If numeric parsing failed, treat as string
+        processedValue = String(cellValue);
+        dataType = "string";
+      }
+    } else {
+      // Non-numeric, non-date values are treated as strings
+      processedValue = String(cellValue);
+      dataType = "string";
+    }
+
+    // Extract row name (first column or coded value)
+    const rowName = this.extractRowName(rowData, headers);
+    
+    // Extract time information
+    const timeInfo = this.extractTimeInfo(rowData);
+    
+    // For coded rows like "CUST_001", use headers like "customer_region"
+    // For normal rows, use "RowName_ColName" format
+    const semanticString = this.buildSemanticString(sheetName, rowName, colName, rowData, headers.columnHeaders);
+    
+    // Create cell object
+    const cell: EnhancedParsedCell = {
+      _id: `cell_${Math.random().toString(36).substring(2, 15)}`,
+      tenantId,
+      workbookId,
+      sheetId: `sh_${sheetName.toLowerCase().replace(/\s+/g, "_")}`,
+      sheetName,
+      
+      rowIndex: rowIndex + 1, // 1-based
+      colIndex: colIndex + 1, // 1-based
+      rowName,
+      colName,
+      cellAddress: XLSX.utils.encode_cell({ r: rowIndex, c: colIndex }),
+      
+      rawValue: cellValue,
+      value: processedValue, // Store the actual value (numeric or date)
+      metric: colName,
+      
+      semanticString,
+
+      year: timeInfo.year,
+      month: timeInfo.month,
+      quarter: timeInfo.quarter,
+      
+      dimensions: this.extractDimensions(rowData, headers.columnHeaders),
+      
+      dataType: dataType,
+      unit: this.determineUnit(colName),
+      features: this.determineFeatures(colName, cellValue, rowIndex, headers.dataStartRow),
+
+      embedding: [],
+      sourceCell: XLSX.utils.encode_cell({ r: rowIndex, c: colIndex }),
+      sourceFormula: null,
+    };
+
+    return cell;
+  }
+
+  /**
+   * Legacy synchronous parsing (kept for compatibility) 
+   */
+  private parseSheetLegacy(
     ws: XLSX.WorkSheet, 
     sheetName: string, 
     maxRow: number, 
@@ -213,7 +513,7 @@ export class ExcelParser {
         const semanticString = this.buildSemanticString(sheetName, rowName, colName, rowData, headers.columnHeaders);
         
         // Extract time dimensions (only year and month)
-        // const timeInfo = this.extractTimeInfo(rowData);
+        const timeInfo = this.extractTimeInfo(rowData);
         
         // Create cell object
         const cell: EnhancedParsedCell = {
@@ -543,6 +843,23 @@ export class ExcelParser {
       month: timeInfo.month,
       quarter: timeInfo.quarter
     };
+  }
+
+  /**
+   * Extract row name from row data
+   */
+  private extractRowName(rowData: any[], headers: HeaderInfo): string | null {
+    if (!rowData || rowData.length === 0) return null;
+    
+    // Use the first non-empty value as row name
+    for (let i = 0; i < rowData.length; i++) {
+      const value = rowData[i];
+      if (value !== null && value !== undefined && value !== '') {
+        return String(value);
+      }
+    }
+    
+    return null;
   }
 
   /**
