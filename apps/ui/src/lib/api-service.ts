@@ -1,4 +1,6 @@
+import axios from 'axios';
 import { SearchRequest, SearchResponse, SearchResult, LLMResponse } from './search-client';
+import { headers } from 'next/headers';
 
 export interface UploadResponse {
   success: boolean;
@@ -25,32 +27,32 @@ class APIService {
   private baseUrl: string;
 
   constructor() {
-    this.baseUrl = process.env.NEXT_PUBLIC_API_URL || '/api';
+    this.baseUrl = process.env.NEXT_PUBLIC_API_URL || 'backend-plum-six-24.vercel.app';
   }
 
   // Excel Upload and Processing
   async uploadExcelFile(file: File): Promise<UploadResponse> {
     try {
       const formData = new FormData();
-      formData.append('file', file);
-      formData.append('timestamp', new Date().toISOString());
-
-      const response = await fetch(`${this.baseUrl}/upload`, {
+      formData.append("file", file);
+      formData.append("timestamp", new Date().toISOString());
+  
+      const response = await fetch(`${this.baseUrl}/api/upload`, {
         method: 'POST',
         body: formData,
       });
-
+  
       if (!response.ok) {
-        throw new Error(`Upload failed: ${response.statusText}`);
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
 
       return await response.json();
     } catch (error) {
-      console.error('Upload error:', error);
+      console.error("Upload error:", error);
       throw error;
     }
   }
-
+  
   // Semantic Search
   async performSearch(request: SearchRequest): Promise<SearchResponse> {
     try {

@@ -1,3 +1,8 @@
+import axios from "axios";
+
+// Use local API routes to avoid CORS issues
+const API_URL = '/api';
+
 export interface Workbook {
   id: string;
   name: string;
@@ -28,6 +33,7 @@ export interface SearchResult {
   workbookId: string;
   sheetId: string;
   sheetName: string;
+  cellAddress: string;
   semanticString: string;
   metric: string;
   value: string | number | Date | null;
@@ -68,9 +74,12 @@ export class ApiService {
       const formData = new FormData();
       formData.append('file', file);
 
-      const response = await fetch('/api/upload', {
+      const response = await fetch(`${API_URL}/upload`, {
         method: 'POST',
         body: formData,
+        headers:{
+          'Access-Control-Allow-Origin':'*'
+        }
       });
 
       if (!response.ok) {
@@ -89,7 +98,7 @@ export class ApiService {
    */
   async fetchWorkbooks(): Promise<WorkbooksResponse> {
     try {
-      const response = await fetch('/api/workbooks');
+      const response = await fetch(`${API_URL}/workbooks`);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
@@ -110,7 +119,7 @@ export class ApiService {
     topK: number = 50
   ): Promise<SearchResponse> {
     try {
-      const response = await fetch('/api/search', {
+      const response = await fetch(`${API_URL}/search`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
